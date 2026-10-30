@@ -93,7 +93,7 @@ Nenhuma alteração do TI é revertida.
 
 | # | Gravidade | Onde | Achado | Ação |
 |---|---|---|---|---|
-| A1 | alta (pedido) | `templates/index.html`, `static/js/app.js` | card principal fixo na balança; medidor em card secundário; sem seletor Analógico/Pulso; "Sinal: X Hz" em vez de pulsos brutos | card dinâmico por método (T2) |
+| A1 | alta (pedido) | `templates/index.html`, `static/js/app.js` | card principal fixo na balança; medidor em card secundário; sem seletor Analógico/Pulso; "Sinal: X Hz" em vez de pulsos brutos | card dinâmico por método: balança ou medidor como principal, pluviômetro ao lado (T2) |
 | A2 | alta (pedido) | `app.js:saveDuration`, `index.html:44` | duração só em segundos inteiros (10–21600), sem unidade; não usa `trial_duration_ms` que o servidor já aceita | duração em ms/s/min com mínimo = Scan (T2) |
 | A3 | média | `trials.py` | resultado não registra explicitamente carimbo inicial/final, tempo configurado × efetivo × relógio do PC num bloco único | bloco `timing` (T3) |
 | A4 | média | `static/js/trials.js`, `templates/relatorio.html` | detalhe/relatório mostram duração em s inteiros (`mmss`), K só em pulsos/L | ms + unidade de K (T2) |

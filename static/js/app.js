@@ -441,15 +441,15 @@ async function saveConfig() {
 }
 
 // ---------- método, período e navegação ----------
-// Card principal dinâmico: gravimétrico → balança (hero) + pluviômetro; comparativo → medidor de vazão (hero) + balança como referência.
-// Só reorganiza o DOM (classe, ordem e os controles do ensaio): nada é recarregado e nenhum estado se perde.
+// Card principal dinâmico: gravimétrico → balança (hero) + pluviômetro; comparativo → medidor de vazão (hero) + pluviômetro (a balança some;
+// a referência gravimétrica do ensaio comparativo aparece dentro do card do medidor). Só reorganiza o DOM: nada é recarregado, nenhum estado se perde.
 function applyMethod() {
   const comp = S.method === 'comp', row = $('#main-row'), mass = $('#c-mass'), cor = $('#c-cor'), pluv = $('#c-pluv'), hero = comp ? cor : mass;
   $$('#meth .seg button').forEach(b => { const on = b.dataset.m === S.method; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
-  cor.hidden = !comp; pluv.hidden = comp; $('#g-cor').hidden = !comp;
+  cor.hidden = !comp; mass.hidden = comp; $('#g-cor').hidden = !comp;
   mass.classList.toggle('hero', !comp); cor.classList.toggle('hero', comp);
   if (row.firstElementChild !== hero) row.insertBefore(hero, row.firstElementChild);
-  if (comp && mass.previousElementSibling !== cor) row.insertBefore(mass, cor.nextElementSibling);
+  if (pluv.previousElementSibling !== hero) row.insertBefore(pluv, hero.nextElementSibling);   // pluviômetro sempre ao lado do card principal
   hero.appendChild($('#trial-ctl'));
   if (S.cfg) { renderBal(); renderPluv(); renderCor(); renderTrialCtl(); setPills(); }
   Object.values(Charts.c).forEach(c => c.resize());

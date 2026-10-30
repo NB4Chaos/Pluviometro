@@ -51,7 +51,7 @@ Configure em *Configurações*: resolução do pluviômetro, área de captação
 faixa 4–20 mA e tolerância nos limites. Nenhum valor físico é presumido: o que depende de um parâmetro vazio fica indisponível.
 
 Tela: **Método** (Gravimétrico | Comparativo) escolhe o ensaio e o **card principal**: no Gravimétrico é a balança (pluviômetro ao lado); no Comparativo é o
-Medidor de vazão (balança ao lado, como referência). No card do medidor fica o seletor **Analógico 4–20 mA | Pulsos** (o método *solicitado* só vira *ativo*
+Medidor de vazão (pluviômetro ao lado; a balança some, e a referência gravimétrica do ensaio aparece dentro do card do medidor). No card do medidor fica o seletor **Analógico 4–20 mA | Pulsos** (o método *solicitado* só vira *ativo*
 quando uma amostra do datalogger é calculada com ele; a troca é recusada durante um ensaio e quando o programa carregado não tem o canal). A **duração do
 ensaio** (ms, s ou min; mínimo = Scan do datalogger) e o botão de iniciar ficam no card principal. A forma de exibir os resultados do pluviômetro
 (precipitação ou vazão/volume) fica em *Configurações → Exibição*. Nada disso altera a aquisição: o CR1000Xe mede os dois canais sempre.

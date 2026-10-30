@@ -24,7 +24,7 @@ Marque só depois de comparar com o datalogger (LoggerNet, Device Configuration 
 - [ ] Período de 1 min disponível; acumulado e intensidade média mudam com o período; “parcial” aparece se houver lacuna
 - [ ] Gráficos: resultado do período em destaque (massa coletada / precipitação acumulada / média), média do período em texto menor e linha tracejada discreta
 - [ ] Configurações → Exibição → "Vazão e volume": pluviômetro em volume equivalente (mL) e vazão equivalente; balança continua em g; nada muda na aquisição
-- [ ] Método → Comparativo: o card principal (azul) passa a ser o Medidor de vazão, com a balança ao lado como referência; Gravimétrico: o card principal volta a ser a balança, com o pluviômetro ao lado. Sem recarregar a página; o período e a configuração não mudam
+- [ ] Método → Comparativo: o card principal (azul) passa a ser o Medidor de vazão, com o pluviômetro ao lado e a balança oculta; Gravimétrico: o card principal volta a ser a balança, com o pluviômetro ao lado. Sem recarregar a página; o período e a configuração não mudam
 - [ ] Card principal: Iniciar → acompanha no mesmo card (decorrido, restante, valores "parcial") → depois mostra o resultado congelado; o seletor de método fica travado durante o ensaio
 - [ ] Duração: digitar 500 ms é recusado com "mínimo 1000 ms (resolução efetiva)"; 1500 ms é aceito com aviso de quantização; trocar só a unidade converte o número sem mudar a duração
 - [ ] Medidor por pulsos (v4 carregado): "Pulsos no último Scan" = `Flow_Pulsos` no *Numeric Monitor*; "Contador do datalogger" = `Flow_PulsosTot`; no ensaio, N = Δ contador; com K informado, vazão = N ÷ K ÷ Δt confere com um padrão; sem K, "não configurado" (nunca um número)
