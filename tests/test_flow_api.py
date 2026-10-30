@@ -207,3 +207,36 @@ def test_uma_segunda_copia_do_servidor_nao_sobe(v4):
             app.single_instance()
     finally:
         lock.close()
+
+
+def test_duracao_em_ms_respeita_o_scan_e_preserva_o_valor_digitado(v4):
+    """31/10: duração interna em ms (trial_duration_ms + trial_duration_unit); mínimo = Scan do datalogger; `trial_duration_s` continua derivado."""
+    app, fake, c = v4
+    cfg = c.get("/api/config").get_json()
+    assert cfg["trial_duration_ms"] == 10_000 and cfg["trial_duration_s"] == 10 and cfg["scan_ms"] == 1000 and cfg["duration_min_ms"] == 1000
+    st, j = post(c, "/api/config", {"trial_duration_ms": 1500, "trial_duration_unit": "ms"})
+    assert st == 200 and j["trial_duration_ms"] == 1500 and j["trial_duration_s"] == 1.5 and j["trial_duration_unit"] == "ms"
+    st, j = post(c, "/api/config", {"trial_duration_ms": 500})
+    assert st == 400 and "1000 ms" in j["error"]
+    st, j = post(c, "/api/config", {"trial_duration_s": 30})
+    assert st == 200 and j["trial_duration_ms"] == 30_000 and j["trial_duration_s"] == 30
+    assert json.load(open(os.path.join(app.DATA, "config.json"), encoding="utf-8"))["trial_duration_ms"] == 30_000
+
+
+def test_ensaio_traz_pulsos_brutos_parciais_e_bloco_de_temporizacao(v4):
+    app, fake, c = v4
+    cycle(app)
+    post(c, "/api/flow/method", {"method": "pulse"})
+    cycle(app, fake)
+    post(c, "/api/config", {"trial_duration_ms": 3000})
+    st, t = post(c, "/api/trials/start", {"kind": "flow"})
+    assert st == 200 and t["duration_cfg_ms"] == 3000
+    cycle(app, fake)
+    run = c.get("/api/trials").get_json()["running"]
+    assert run and run["partial"]["flow"]["pulses_total"] == 100 and run["scan_ms"] == 1000     # contagem bruta parcial, não convertida
+    for _ in range(3):
+        cycle(app, fake)
+    done = c.get(f"/api/trials/{t['id']}").get_json()
+    f, tm = done["result"]["flow"], done["result"]["timing"]
+    assert done["state"] != "running" and f["pulses_total"] == 300 and f["count_method"] == "acumulado"
+    assert tm["cfg_ms"] == 3000 and tm["samples"] == 3 and tm["eff_ms"] == 3000 and tm["resolution_ms"] == 1000 and tm["wall_ms"] >= 0

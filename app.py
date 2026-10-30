@@ -24,6 +24,7 @@ INSTALL_DEFAULTS = {"address": "169.254.244.82", "protocol": "http", "profile": 
 MASS_UNITS, TEMP_UNITS = ("mg", "g", "kg", "lb", "oz"), ("C", "F", "K")
 FLOW_UNITS = ("L/min", "L/h", "mL/min", "mL/s", "m³/h", "m³/s", "m³/min", "kg/h", "kg/s")
 FLOW_METHODS = ("analog", "pulse")
+DUR_UNITS, TRIAL_MAX_MS = ("ms", "s", "min"), 6 * 3600 * 1000
 METHOD_LABEL = {"analog": "analógico (4–20 mA)", "pulse": "pulsos"}
 DEFAULTS = {"mass_unit": "g", "temp_unit": "C", "flow_unit": "L/min", "mass_decimals": 1, "temp_decimals": 2,
             "flow_decimals": 3, "density_g_cm3": None, "tip_resolution_mm": None,
@@ -33,7 +34,9 @@ DEFAULTS = {"mass_unit": "g", "temp_unit": "C", "flow_unit": "L/min", "mass_deci
             "flow_k_unit": "pulsos/L",     # só a unidade em que o operador digita e vê o K (calc.K_UNITS)
             "flow_method": "analog",       # método do cálculo da vazão: analog | pulse (o datalogger mede os dois canais)
             "flow_ma_tol": calc.MA_TOL,    # mA: tolerância nos limites 4 e 20 mA (dentro dela a escala fica presa no limite)
-            "trial_duration_s": 60,        # duração dos ensaios (card da balança); fixada no início de cada ensaio
+            "trial_duration_ms": 60000,    # duração dos ensaios; fixada no início de cada ensaio; mínimo = Scan do datalogger
+            "trial_duration_unit": "s",    # unidade em que o operador digita (ms | s | min); internamente tudo é ms
+            "trial_duration_s": 60,        # derivado de trial_duration_ms (compatibilidade com configurações e testes anteriores)
             "cor": {"q4": None, "q20": None, "unit": "L/min"},  # faixa 4–20 mA: definida pelo operador, nunca fixa no código
             "comm": {"protocol": "http", "address": "", "user": "", "profile": "programa_atual"}}
 COLS = ["ts", "mass_g", "temp_c", "mass_status", "temp_status", "tips_total", "cor_ma", "cor_status",
@@ -68,6 +71,21 @@ lock = threading.Lock()
 
 
 # ---------- configuração (lida do disco uma vez; só save_cfg a atualiza) ----------
+def _norm_duration(cfg, has_ms):
+    """Duração do ensaio: interna em ms; `trial_duration_s` é derivado (inteiro quando exato). Configuração antiga só tinha segundos."""
+    ms = cfg.get("trial_duration_ms") if has_ms else None
+    if not isinstance(ms, (int, float)) or isinstance(ms, bool) or not 0 < ms <= TRIAL_MAX_MS:
+        try:
+            ms = int(round(float(cfg.get("trial_duration_s") or DEFAULTS["trial_duration_s"]) * 1000))
+        except (TypeError, ValueError):
+            ms = DEFAULTS["trial_duration_ms"]
+    cfg["trial_duration_ms"] = int(ms)
+    cfg["trial_duration_s"] = ms // 1000 if ms % 1000 == 0 else ms / 1000
+    if cfg.get("trial_duration_unit") not in DUR_UNITS:
+        cfg["trial_duration_unit"] = "s"
+    return cfg
+
+
 def _read_cfg():
     """Configuração = padrões + config.json. Chave nova ausente ou inválida volta ao padrão seguro (arquivos antigos continuam valendo)."""
     cfg, user = copy.deepcopy(DEFAULTS), {}
@@ -79,6 +97,7 @@ def _read_cfg():
         cfg["cor"].update(user.get("cor", {}))
     if cfg.get("flow_method") not in FLOW_METHODS:
         cfg["flow_method"] = "analog"
+    _norm_duration(cfg, "trial_duration_ms" in user)
     if cfg.get("flow_k_unit") not in calc.K_UNITS:
         cfg["flow_k_unit"] = "pulsos/L"
     tol = cfg.get("flow_ma_tol")
@@ -200,7 +219,8 @@ def latest_sample_ts():
 
 
 state = {"latest": None, "last_rx": None, "trial_id": None}
-trials = Trials(db, lock, load_cfg, latest_sample_ts)
+SCAN_MS = int(dl.profile.get("scan_ms") or 1000)   # intervalo do Scan do programa CRBasic: resolução temporal efetiva dos registros
+trials = Trials(db, lock, load_cfg, latest_sample_ts, scan_ms=SCAN_MS)
 
 
 # ---------- Medidor de Vazão: os dois canais (4–20 mA em RG1 e pulsos em P2) -> L/min, sempre a partir do dado bruto ----------
@@ -894,7 +914,7 @@ def public_cfg(cfg):
     c["comm"].pop("address", None)   # o endereço do datalogger não é exibido nem editável pela interface
     return c | {"active_mode": MODE, "write_protected": bool(DASHBOARD_TOKEN),
                 "flow_k_value": calc.k_from_pulses_per_l(cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"]),   # K na unidade de exibição
-                "flow_k_units": list(calc.K_UNITS), "ma_fault": calc.MA_FAULT}
+                "flow_k_units": list(calc.K_UNITS), "ma_fault": calc.MA_FAULT, "scan_ms": SCAN_MS, "duration_min_ms": SCAN_MS}
 
 
 @app.get("/api/config")
@@ -968,8 +988,22 @@ def set_config():
             cfg["flow_ma_tol"] = tol
         if "default_range_s" in d:
             cfg["default_range_s"] = whole(d["default_range_s"], "Período inicial", 1, 31 * 86400)
-        if "trial_duration_s" in d:
-            cfg["trial_duration_s"] = whole(d["trial_duration_s"], "Duração do ensaio", 10, 6 * 3600)
+        # ---- duração do ensaio: internamente em ms; mínimo = resolução efetiva do datalogger (Scan); nunca arredondada ao salvar
+        if "trial_duration_ms" in d:
+            ms = whole(d["trial_duration_ms"], "Duração do ensaio", 1, TRIAL_MAX_MS)
+            if ms < SCAN_MS:
+                raise ValueError(f"Duração do ensaio: mínimo {SCAN_MS} ms, que é a resolução efetiva do datalogger (Scan de {SCAN_MS} ms). "
+                                 "Valores menores não podem ser medidos com o programa atual.")
+            cfg["trial_duration_ms"] = ms
+        elif "trial_duration_s" in d:
+            cfg["trial_duration_ms"] = whole(d["trial_duration_s"], "Duração do ensaio", 1, TRIAL_MAX_MS // 1000) * 1000
+            if cfg["trial_duration_ms"] < SCAN_MS:
+                raise ValueError(f"Duração do ensaio: mínimo {SCAN_MS} ms (resolução efetiva do datalogger).")
+        if "trial_duration_unit" in d:
+            if d["trial_duration_unit"] not in DUR_UNITS:
+                raise ValueError("Unidade da duração inválida (ms | s | min).")
+            cfg["trial_duration_unit"] = d["trial_duration_unit"]
+        _norm_duration(cfg, True)
         if "cor" in d:
             c, cur = d["cor"] or {}, cfg["cor"]
             unit = c.get("unit", cur["unit"])
@@ -1008,8 +1042,8 @@ def set_config():
     if cfg["flow_method"] != FLOW["requested"]:
         set_requested(cfg["flow_method"])
     log.info("configuração salva (resolução=%s, área=%s, K=%s pulsos/L (exibido em %s), faixa 4–20 mA=%s..%s %s, tolerância=%s mA, "
-             "duração do ensaio=%ss)", cfg["tip_resolution_mm"], cfg["catch_area_cm2"], cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"],
-             cfg["cor"]["q4"], cfg["cor"]["q20"], cfg["cor"]["unit"], cfg["flow_ma_tol"], cfg["trial_duration_s"])
+             "duração do ensaio=%s ms)", cfg["tip_resolution_mm"], cfg["catch_area_cm2"], cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"],
+             cfg["cor"]["q4"], cfg["cor"]["q20"], cfg["cor"]["unit"], cfg["flow_ma_tol"], cfg["trial_duration_ms"])
     pc = public_cfg(cfg)
     sio.emit("config", pc)   # outras abas abertas passam a usar a mesma configuração
     return jsonify(pc)
