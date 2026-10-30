@@ -56,7 +56,7 @@ c.close()
 
 # ---- queda de rede de 10 s: o datalogger segue gravando; nada de linhas inventadas; na volta, tudo recuperado
 before = db().execute("SELECT COUNT(*) FROM samples").fetchone()[0]
-emu("_outage&on=1"); time.sleep(10); emu("_outage&on=0"); time.sleep(6)
+emu("_outage&on=1"); time.sleep(10); emu("_outage&on=0"); time.sleep(13)   # 30/10: o recuo progressivo (1, 2, 4, 8 s) só volta a consultar ~15 s após o início da queda
 c = db()
 ts = [r[0] for r in c.execute("SELECT ts FROM samples ORDER BY ts")]
 gap = max(b - a for a, b in zip(ts, ts[1:]))

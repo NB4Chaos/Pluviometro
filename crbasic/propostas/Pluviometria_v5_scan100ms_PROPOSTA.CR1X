@@ -1,0 +1,315 @@
+'==================================================================
+' *** PROPOSTA - NAO COMPILADA - NAO CARREGADA NO CR1000Xe ***
+' AQUISICAO DE CALIBRACAO - CR1000Xe - Scan principal de 100 ms
+' Balanca MK30K1 + Termopar tipo T + Pluviometro + MAG 5000 (RG1 e P2)
+'
+' v5 (30/10/2026): proposta derivada do Pluviometria_v4_vazao_pulsos.CR1X
+'   para medir INTERVALOS MENORES QUE 1 s nos ensaios por pulsos.
+'   O que muda em relacao ao v4:
+'     - Scan principal de 100 ms com SOMENTE os dois PulseCount (P1 e P2):
+'       a contagem bruta de pulsos do medidor e as basculadas passam a ser
+'       registradas a cada 100 ms (tabelas Vazao100ms e Pluviometro100ms).
+'     - Balanca (serial), termopar (TCDiff) e 4-20 mA (CurrentSE) vao para
+'       uma SlowSequence de 1 s: sao sinais lentos e as instrucoes de
+'       medicao com integracao de 60 Hz + inversao (dezenas de ms) nao
+'       cabem com folga num Scan de 100 ms junto com o laco serial.
+'     - Tabelas de 100 ms com 100000 registros (2,8 h de anel).
+'   O que NAO muda: ligacoes, canais, faixas, PConfig, fator K, formato
+'   da balanca. Nenhum parametro fisico foi alterado.
+'
+'   LIMITES (ver docs/TEMPORIZACAO_E_PULSOS.md):
+'     - resolucao efetiva passa de 1000 ms para 100 ms (quantizacao de
+'       +-1 Scan no inicio e no fim do ensaio); os carimbos tem 1 ms.
+'     - 10 ms de Scan e possivel no CR1000Xe, mas NAO esta nesta proposta:
+'       exigiria rever o tempo de processamento (ProcTime/MaxProcTime) e o
+'       volume de registros (100 por segundo por tabela) que o servidor
+'       precisa consultar por HTTP.
+'     - O servidor Python precisa de alteracao para consumir tabelas de
+'       100 ms (hoje a leitura e guiada pela tabela da balanca, de 1 s).
+'   ANTES DE CARREGAR: compilar no CRBasic Editor, carregar num datalogger
+'   de teste, conferir SkippedScan, ProcTime, MaxProcTime, SkippedSlowScan
+'   e os nomes dos campos com tools/probe_cr1000x.py.
+'
+' BALANCA:  ComC5 / TX balanca -> C6, RX balanca -> C5, GND -> G
+' TERMOPAR: tipo T, 1H (+) / 1L (-)
+' PLUVIOMETRO: contato seco P1 / G, PConfig 1 (fechamento com pull-up)
+' MAG 5000 4-20 mA: RG1 (CurrentSE)
+' MAG 5000 pulsos: P2, PConfig 3 (alta frequencia, pull-up) - LIGACAO
+'   NAO VALIDADA: saida ativa de 24 V NAO pode ir em P2 (max +-20 V);
+'   usar saida passiva com pull-up externo, terminais a confirmar.
+'==================================================================
+
+Const SerFmtBal = 3
+Const PesoMin = -100
+Const PesoMax = 31000
+Const MsgLenMin = 8
+Const Pluvio_mmPorBasculada = 0.2
+
+Const Flow_Min_mA = 4.0
+Const Flow_Max_mA = 20.0
+
+' Scan principal (ms) e limite de plausibilidade da frequencia (Hz)
+Const ScanMs = 100
+Const Flow_PMaxHz = 12000
+Const Flow_PMaxPorScan = Flow_PMaxHz * ScanMs / 1000   ' 1200 pulsos por Scan
+
+'------------------------- balanca
+Public Peso_g As Float
+Public StatusBal As Long
+Public LinhaNova As Boolean
+Public LastLine As String * 60
+Public RxLine As String * 60
+Public NumLido(3) As Float
+Public FatorG As Float
+Public BaudSel As Long
+Public BaudInUse As Long
+Public NBuf As Long
+Public NBufIni As Long
+Public TotalOK As Long
+Public TotalFalha As Long
+Public FalhasSeguidas As Long
+Public Alarm_Balanca As Boolean
+
+'------------------------- termopar
+Public PTemp_C As Float
+Public TempAgua_C As Float
+
+'------------------------- pluviometro (100 ms)
+Public Pluvio_Basculadas As Float
+Public Pluvio_Total As Float
+Public Pluvio_Chuva_mm As Float
+
+'------------------------- medidor 4-20 mA (1 s)
+Public Flow_mA As Float
+Public Flow_mV As Float
+Public Flow_Status As Long
+Public Flow_mode As Long
+
+'------------------------- medidor pulsos (100 ms)
+Public Flow_Pulsos As Float
+Public Flow_PulsosTot As Long
+Public Flow_PStatus As Long
+
+Dim BytesVistos As Boolean
+Dim TemDigito As Boolean
+Dim Flow_Primeira As Boolean
+Dim i As Long
+Dim k As Long
+Dim b As Long
+
+'================================================================== tabelas de 1 s (SlowSequence)
+DataTable(Balanca1s,True,20000)
+  Sample(1,Peso_g,IEEE4)
+  Sample(1,StatusBal,Long)
+  Sample(1,LinhaNova,Boolean)
+  Sample(1,BaudInUse,Long)
+  Sample(1,LastLine,String)
+EndTable
+
+DataTable(Resumo,True,1440)
+  DataInterval(0,1,Min,10)
+  Sample(1,TotalOK,Long)
+  Sample(1,TotalFalha,Long)
+  Sample(1,FalhasSeguidas,Long)
+EndTable
+
+DataTable(Termopar1s,True,20000)
+  Sample(1,TempAgua_C,IEEE4)
+  Sample(1,PTemp_C,IEEE4)
+EndTable
+
+' 4-20 mA: os 4 campos do v3/v4, para o perfil programa_vazao continuar lendo
+DataTable(Vazao1s,True,20000)
+  Sample(1,Flow_mV,IEEE4)
+  Sample(1,Flow_mA,IEEE4)
+  Sample(1,Flow_Status,Long)
+  Sample(1,Flow_mode,Long)
+EndTable
+
+'================================================================== tabelas de 100 ms (Scan principal)
+DataTable(Pluviometro100ms,True,100000)
+  Sample(1,Pluvio_Basculadas,IEEE4)
+  Sample(1,Pluvio_Total,IEEE4)
+  Sample(1,Pluvio_Chuva_mm,IEEE4)
+EndTable
+
+DataTable(Vazao100ms,True,100000)
+  Sample(1,Flow_Pulsos,IEEE4)
+  Sample(1,Flow_PulsosTot,Long)
+  Sample(1,Flow_PStatus,Long)
+EndTable
+
+'==================================================================
+BeginProg
+  BaudSel = 9600
+  FatorG = 1
+  BaudInUse = BaudSel
+  SerialOpen(ComC5,BaudSel,SerFmtBal,0,1000,0)
+  SerialFlush(ComC5)
+
+  Peso_g = NAN
+  TempAgua_C = NAN
+  PTemp_C = NAN
+  Flow_mA = NAN
+  Flow_mV = NAN
+  Flow_Status = 3
+  Flow_mode = 2
+  Flow_Pulsos = NAN
+  Flow_PulsosTot = 0
+  Flow_PStatus = 1
+  Flow_Primeira = True
+  Pluvio_Basculadas = 0
+  Pluvio_Total = 0
+  Pluvio_Chuva_mm = 0
+  TotalOK = 0
+  TotalFalha = 0
+  FalhasSeguidas = 0
+  Alarm_Balanca = False
+
+  '------------------------------------------------------------
+  ' SCAN PRINCIPAL 100 ms: SO contagem de pulsos (P1 e P2).
+  ' PulseCount tem de ficar no Scan principal, fora de If/Sub.
+  '------------------------------------------------------------
+  Scan(ScanMs,mSec,10,0)
+
+    PulseCount(Flow_Pulsos,1,P2,3,0,1,0)
+
+    If Flow_Primeira = True Then
+      Flow_PStatus = 1
+      Flow_Pulsos = NAN
+      Flow_Primeira = False
+    ElseIf Flow_Pulsos = NAN Then
+      Flow_PStatus = 4
+    ElseIf Flow_Pulsos >= 16777216 Then
+      Flow_PStatus = 2
+      Flow_Pulsos = NAN
+    ElseIf Flow_Pulsos > Flow_PMaxPorScan Then
+      Flow_PStatus = 3
+      Flow_Pulsos = NAN
+    Else
+      Flow_PStatus = 0
+      Flow_PulsosTot = Flow_PulsosTot + Flow_Pulsos
+      If Flow_PulsosTot > 2000000000 Then
+        Flow_PulsosTot = 0
+      EndIf
+    EndIf
+
+    PulseCount(Pluvio_Basculadas,1,P1,1,0,1,0)
+    Pluvio_Total = Pluvio_Total + Pluvio_Basculadas
+    Pluvio_Chuva_mm = Pluvio_Total * Pluvio_mmPorBasculada
+
+    CallTable Vazao100ms
+    CallTable Pluviometro100ms
+
+  NextScan
+
+  '------------------------------------------------------------
+  ' SLOW SEQUENCE 1 s: termopar, 4-20 mA e balanca (identicos ao v4)
+  '------------------------------------------------------------
+  SlowSequence
+  Scan(1,Sec,10,0)
+
+    PanelTemp(PTemp_C,4000)
+    TCDiff(TempAgua_C,1,mV200C,1,TypeT,PTemp_C,True,0,60,1,0)
+
+    Flow_mode = 2
+    CurrentSE(Flow_mA,1,mV200,RG1,True,0,60,1,0)
+    Flow_mV = Flow_mA * 10
+    If Flow_mA = NAN Then
+      Flow_Status = 3
+    ElseIf Flow_mA < Flow_Min_mA Then
+      Flow_Status = 1
+    ElseIf Flow_mA > Flow_Max_mA Then
+      Flow_Status = 2
+    Else
+      Flow_Status = 0
+    EndIf
+
+    LinhaNova = False
+    BytesVistos = False
+    Peso_g = NAN
+    LastLine = ""
+    StatusBal = 1
+
+    If BaudSel <> BaudInUse Then
+      If BaudSel = 1200 OR BaudSel = 2400 OR BaudSel = 4800 OR BaudSel = 9600 OR BaudSel = 19200 OR BaudSel = 38400 OR BaudSel = 57600 OR BaudSel = 115200 Then
+        SerialClose(ComC5)
+        SerialOpen(ComC5,BaudSel,SerFmtBal,0,1000,0)
+        SerialFlush(ComC5)
+        BaudInUse = BaudSel
+      Else
+        BaudSel = BaudInUse
+      EndIf
+    EndIf
+
+    NBufIni = SerialInChk(ComC5)
+    For k = 1 To 100
+      NBuf = SerialInChk(ComC5)
+      If NBuf = 0 Then
+        ExitFor
+      EndIf
+      BytesVistos = True
+      RxLine = ""
+      SerialIn(RxLine,ComC5,10,CHR(10),60)
+      If Right(RxLine,1) = CHR(10) Then
+        LastLine = RxLine
+        LinhaNova = True
+      EndIf
+    Next k
+
+    If BytesVistos = False Then
+      StatusBal = 1
+    ElseIf LinhaNova = False Then
+      StatusBal = 2
+    Else
+      TemDigito = False
+      For i = 1 To Len(LastLine)
+        b = ASCII(Mid(LastLine,i,1))
+        If b >= 48 AND b <= 57 Then
+          TemDigito = True
+        EndIf
+      Next i
+      If Len(LastLine) < MsgLenMin OR TemDigito = False Then
+        StatusBal = 3
+      Else
+        NumLido(1) = NAN
+        NumLido(2) = NAN
+        NumLido(3) = NAN
+        SplitStr(NumLido(1),LastLine,"",3,0)
+        If Left(LastLine,1) = "-" Then
+          Peso_g = -1 * ABS(NumLido(1)) * FatorG
+        Else
+          Peso_g = NumLido(1) * FatorG
+        EndIf
+        If Peso_g = NAN Then
+          StatusBal = 3
+        ElseIf Peso_g < PesoMin OR Peso_g > PesoMax Then
+          Peso_g = NAN
+          StatusBal = 4
+        Else
+          StatusBal = 0
+        EndIf
+      EndIf
+    EndIf
+
+    If StatusBal = 0 Then
+      TotalOK = TotalOK + 1
+      FalhasSeguidas = 0
+      Alarm_Balanca = False
+    Else
+      TotalFalha = TotalFalha + 1
+      FalhasSeguidas = FalhasSeguidas + 1
+      If FalhasSeguidas > 5 Then
+        Alarm_Balanca = True
+      EndIf
+    EndIf
+
+    CallTable Balanca1s
+    CallTable Resumo
+    CallTable Termopar1s
+    CallTable Vazao1s
+
+  NextScan
+  EndSequence
+
+EndProg

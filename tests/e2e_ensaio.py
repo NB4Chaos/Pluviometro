@@ -23,7 +23,7 @@ fake.mass = 500.0
 fake.run(period=1.0)
 ADDR = f"127.0.0.1:{fake.port}"
 json.dump({"comm": {"protocol": "http", "address": ADDR, "user": "dash", "profile": "programa_vazao"}, "tip_resolution_mm": 0.2,
-           "density_g_cm3": 1.0, "catch_area_cm2": 100.0, "flow_k_pulses_per_l": 1000.0, "trial_duration_s": 10},
+           "density_g_cm3": 1.0, "catch_area_cm2": 100.0, "flow_method": "pulse", "flow_k_value": 1000.0, "flow_k_unit": "pulsos/L", "trial_duration_s": 10},
           open(os.path.join(DATA, "config.json"), "w"))
 env = dict(os.environ, ELUS_DATA_DIR=DATA, DATALOGGER_PASSWORD="segredo", PORT=PORT, PYTHONUNBUFFERED="1", LOG_LEVEL="DEBUG")
 for k in ("DATALOGGER_HOST", "DATALOGGER_USER", "CR1000X_PROFILE", "DASHBOARD_TOKEN"):
@@ -68,14 +68,19 @@ wait(lambda: api("/api/summary")[1].get("latest") if api("/api/summary")[0] == 2
 s, summ = api("/api/summary")
 ok("servidor leu o datalogger (perfil com Vazao1s) e se declara conectado", s == 200 and summ["link"]["connected"] and summ["link"]["flow_integrated"])
 lat = summ["latest"]
-ok(f"medidor por pulsos: {lat['flow_pulses']} pulsos/s, {lat['flow_hz']} Hz, estado {lat['flow_state']} (K configurado = 1000 pulsos/L -> 6 L/min)",
-   lat["flow_mode"] == "pulse" and lat["flow_state"] == "ok" and abs(lat["flow_lmin"] - 6.0) < 1e-6)
+ok(f"medidor por pulsos: {lat['flow_pulses']} pulsos brutos no Scan, acumulado {lat['flow_pulses_total']}, estado {lat['flow_state']} (K = 1000 pulsos/L -> 6 L/min)",
+   lat["flow"]["method"] == "pulse" and lat["flow"]["active"] == "pulse" and lat["flow_state"] == "ok" and abs(lat["flow_lmin"] - 6.0) < 1e-6
+   and lat["flow_pulses"] == 100 and lat["flow_pulses_total"] >= 100)
+# 30/10: o método (analógico | pulsos) é do servidor (flow_method), não do campo Flow_mode do datalogger (que fica em 2 no v3/v4).
+s, fv = api("/api/flow")
+ok("GET /api/flow: método solicitado = ativo = pulsos, canais do programa v4 e dado bruto", s == 200 and fv["method"] == fv["active"] == "pulse"
+   and fv["channels"] == {"analog": True, "pulse": True} and fv["raw"]["pulses"] == 100)
 
 # ---- configuração: endereço preservado, sem aceitar endereço pela interface
 s, cfg = api("/api/config")
 ok("a API de configuração não expõe o endereço do datalogger", "address" not in cfg["comm"])
 body = {k: cfg[k] for k in ("mass_unit", "temp_unit", "flow_unit", "mass_decimals", "temp_decimals", "flow_decimals", "default_range_s", "cor",
-                            "tip_resolution_mm", "density_g_cm3", "catch_area_cm2", "flow_k_pulses_per_l", "trial_duration_s")}
+                            "tip_resolution_mm", "density_g_cm3", "catch_area_cm2", "flow_k_value", "flow_k_unit", "trial_duration_s")}
 body["comm"] = {"protocol": "http", "user": "", "profile": "programa_vazao", "address": "10.9.9.9:1"}   # tenta trocar o endereço e apagar o usuário
 s, new = api("/api/config", body)
 saved = json.load(open(os.path.join(DATA, "config.json")))
@@ -102,7 +107,15 @@ ok(f"vazão do ensaio = 6 L/min e pulsos brutos conferem ({f['pulses_total']} pu
 g = r["gravimetric"]
 ok(f"gravimetria: delta de massa = {g['delta_mass_g']:.1f} g em {g['duration_s']:.0f} s (balança ganha 0,1 g/s no emulador)",
    abs(g["delta_mass_g"] - 0.1 * g["duration_s"]) < 0.25 and g["volume_ml"] is not None)
-ok("ensaio concluído com a duração fixada no início (10 s), não a nova (30 s)", done["duration_cfg_s"] == 10 and done["end_ts"] - done["start_ts"] == 10_000)
+ok("ensaio concluído com a duração fixada no início (10 s), não a nova (30 s)", done["duration_cfg_s"] == 10 and done["duration_cfg_ms"] == 10_000 and done["end_ts"] - done["start_ts"] == 10_000)
+tm = r["timing"]
+ok(f"temporização registrada: cfg {tm['cfg_ms']} ms, efetivo {tm['eff_ms']} ms, resolução {tm['resolution_ms']} ms, {tm['samples']} amostras, PC {tm['wall_ms']} ms",
+   tm["cfg_ms"] == 10_000 and tm["resolution_ms"] == 1000 and tm["eff_ms"] in (9_000, 10_000) and tm["samples"] == r["quality"]["rows"] and tm["wall_ms"] > 0)
+ok("pulsos brutos do ensaio: N pela diferença do contador acumulado = soma dos registros", f["count_method"] == "acumulado" and f["pulses_delta_total"] == f["pulses_sum"] == f["pulses_total"])
+s, e = api("/api/config", {"trial_duration_ms": 500})
+ok("duração de 500 ms é recusada com a resolução efetiva (Scan de 1000 ms)", s == 400 and "1000 ms" in e.get("error", ""), e.get("error"))
+s, e = api("/api/config", {"trial_duration_ms": 1500, "trial_duration_unit": "ms"})
+ok("duração de 1500 ms (não múltipla do Scan) é aceita e guardada em ms", s == 200 and e["trial_duration_ms"] == 1500 and e["trial_duration_unit"] == "ms" and e["trial_duration_s"] == 1.5)
 ok("resultado sem média de massa (a massa coletada é Δm)", "mass" not in r and g["delta_mass_g"] is not None)
 s, html = api(f"/relatorio/{tid}", raw=True)
 ok("página de relatório imprimível responde (montada no navegador)", s == 200 and "Relatório" in html and "window.print" in html)
@@ -124,7 +137,7 @@ except sqlite3.DatabaseError:
 ok("o próprio banco recusa alterar um ensaio encerrado", not altered)
 con.close()
 s, csvt = api(f"/api/trials/{tid}/raw.csv", raw=True)
-ok("amostras brutas do ensaio exportáveis (pulsos, Hz, estado, vazão)", s == 200 and "Pulsos" in csvt and csvt.count("\n") >= 10)
+ok("amostras brutas do ensaio exportáveis (pulsos, Hz, estado, vazão)", s == 200 and "Pulsos" in csvt and csvt.count("\n") >= 10, f"{s} linhas={csvt.count(chr(10))} {csvt[:160]!r}")
 
 # ---- interrupção pelo usuário
 s, t2 = api("/api/trials/start", {"kind": "pluv"}); time.sleep(3)

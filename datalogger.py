@@ -58,7 +58,8 @@ class Datalogger:
         best = min((k for k in keys[max(0, i - 1):i + 1]), key=lambda k: abs(k - ts), default=None)
         if best is not None and abs(best - ts) <= JOIN_TOL_MS:
             return rows[best]
-        self._miss(table, ts, best)
+        if table not in self._nojoin:   # tabela esparsa (so tem registro quando ha evento): ausencia nao e erro nem vai para o log
+            self._miss(table, ts, best)
         return None
 
     def _miss(self, table, ts, near):

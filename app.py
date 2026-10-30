@@ -29,7 +29,7 @@ from flask_socketio import SocketIO
 
 import calc
 from datalogger import Reading, make_datalogger
-from trials import Trials, TrialError
+from trials import SCOLS_LIST as TRIAL_COLS, Trials, TrialError, flow_of_row as trial_flow_of_row
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("ELUS_DATA_DIR") or BASE   # banco, cursor, config.json e logs (os testes usam uma pasta temporária)
@@ -862,9 +862,9 @@ def trial_raw(tid):
             "Pulsos acumulados (datalogger)", "Estado pulsos", f"Vazão (L/min, método {cfg.get('method', 'analog')})"]
     rows = []
     for r in s:
-        d = dict(zip(trials.SCOLS_LIST, r))
+        d = dict(zip(TRIAL_COLS, r))
         rows.append([datetime.fromtimestamp(d["ts"] / 1000), d["mass_g"], d["temp_c"], d["mass_status"], d["temp_status"], d["cor_ma"], d["cor_status"],
-                     d["flow_mode"], d["flow_pulses"], d["flow_hz"], d["flow_pulses_total"], d["pulse_status"], trials.flow_of_row(d, cfg)])
+                     d["flow_mode"], d["flow_pulses"], d["flow_hz"], d["flow_pulses_total"], d["pulse_status"], trial_flow_of_row(d, cfg)])
     return csv_response(head, rows, f"ensaio-{tid}-amostras.csv")
 
 

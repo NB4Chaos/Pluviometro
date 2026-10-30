@@ -1,7 +1,8 @@
 # Monitor de calibração de pluviômetros · Elus Instrumentação
 
 Dashboard web (Flask + Socket.IO + SQLite) que mostra **somente dados lidos do CR1000Xe**: massa (balança MK30K1), temperatura da água (termopar tipo T),
-basculadas do pluviômetro e, no programa novo, o medidor de vazão (pulsos em P2 ou analógico em 2H/2L). Faz **ensaios de calibração** com resultado congelado.
+basculadas do pluviômetro e o medidor de vazão SITRANS FM MAG 5000 (4–20 mA em RG1 no programa em uso; pulsos em P2 no programa v4). Faz **ensaios de calibração**
+com resultado congelado, contagem bruta de pulsos e registro de temporização.
 Não existe modo demonstração: sem comunicação aparece “Sem dados”, “Aguardando dados novos” ou “Datalogger sem resposta”, e a leitura antiga deixa de ser exibida como atual.
 
 ```
@@ -9,9 +10,11 @@ CR1000Xe ──(HTTP/HTTPS, conta somente leitura)── app.py ──(Socket.IO
  tabelas                consulta sequencial 1 s     SQLite
 ```
 
-Documentação: `docs/DIAGNOSTICO.md` (problemas, alterações, desempenho), `docs/CALCULOS_E_ENSAIOS.md` (fórmulas, ensaios, interface),
-`docs/CRBASIC_VAZAO.md` (programa novo, ligações), `docs/DEBUG.md` (onde mexer), `docs/TESTES.md` (o que foi e o que não foi testado),
-`docs/MAPA_VARIAVEIS.md`, `docs/CHECKLIST.md` (validação no equipamento), `docs/PESQUISA.md` (arquitetura e fontes).
+Documentação (mais recente primeiro): `docs/ENTREGA_2026-10-30.md` (entrega desta revisão, tabela de referência, pendências), `docs/DIAGNOSTICO_2026-10-30.md`,
+`docs/PLANO_2026-10-30.md`, `docs/TEMPORIZACAO_E_PULSOS.md` (resolução temporal real, pulsos brutos, ligação do MAG 5000), `docs/CRBASIC_V4_PULSOS.md`
+(programa v4: carregar e reverter), `docs/MAPA_VARIAVEIS.md`, `docs/Elus_Monitor_Relatorio_Tecnico_Rev1_2026-10-28.pdf` (relatório do TI),
+`docs/CALCULOS_E_ENSAIOS.md`, `docs/TESTES.md`, `docs/DEBUG.md`, `docs/CHECKLIST.md`, `docs/PESQUISA.md`; anteriores: `docs/DIAGNOSTICO_2026-10-29.md`,
+`docs/PLANO_2026-10-29.md`, `docs/CRBASIC_VAZAO.md` (programa 2H/2L, não é o em uso).
 
 ## Instalação e execução (Windows)
 
@@ -40,15 +43,18 @@ Abra `http://127.0.0.1:5000`. Antes, rode o diagnóstico (só lê): `python tool
 | `LOG_LEVEL` | `INFO` (padrão) ou `DEBUG` (uma linha por amostra) |
 | `DATALOGGER_CA`, `DATALOGGER_TLS_VERIFY` | HTTPS: certificado próprio / (só para teste) desligar verificação |
 
-Programas do datalogger: `crbasic/Pluviometria.CR1X` (o seu, perfil `programa_atual`) e `crbasic/Pluviometria_Vazao.CR1X` (com o medidor de vazão, perfil
-`programa_vazao`). **Não compilei nenhum dos dois no CRBasic Editor.**
+Programas do datalogger: `crbasic/Pluviometria_v3_com_vazao_4-20mA.CR1X` (**em uso**, perfil `programa_vazao`), `crbasic/Pluviometria_v4_vazao_pulsos.CR1X`
+(mesmo programa + pulsos em P2, mesmo perfil; **não compilado**) e `crbasic/propostas/Pluviometria_v5_scan100ms_PROPOSTA.CR1X` (proposta para resolução de
+100 ms; não compilada, não carregar sem teste). Os anteriores (`Pluviometria.CR1X`, `_v2`, `_v3`, `_Vazao`) ficam para referência.
 
-Configure em *Configurações*: resolução do pluviômetro, área de captação (cm²), densidade da água e, se houver medidor de vazão, fator K (pulsos/L)
-ou faixa 4–20 mA. A **duração do ensaio** fica no card da balança (fixada no início de cada ensaio). Nenhum valor físico é presumido: o que depende
-de um parâmetro vazio fica indisponível.
+Configure em *Configurações*: resolução do pluviômetro, área de captação (cm²), densidade da água, fator K **com unidade** (pulsos/L, pulsos/m³, L/pulso, mL/pulso),
+faixa 4–20 mA e tolerância nos limites. Nenhum valor físico é presumido: o que depende de um parâmetro vazio fica indisponível.
 
-Tela: **Exibir** (Precipitação | Vazão) só muda a apresentação dos resultados; **Método** (Gravimétrico | Comparativo) escolhe o ensaio
-(pluviômetro × balança ou medidor de vazão × balança) e mostra o Medidor de Vazão só no Comparativo. Nenhum dos dois altera a aquisição.
+Tela: **Método** (Gravimétrico | Comparativo) escolhe o ensaio e o **card principal**: no Gravimétrico é a balança (pluviômetro ao lado); no Comparativo é o
+Medidor de vazão (balança ao lado, como referência). No card do medidor fica o seletor **Analógico 4–20 mA | Pulsos** (o método *solicitado* só vira *ativo*
+quando uma amostra do datalogger é calculada com ele; a troca é recusada durante um ensaio e quando o programa carregado não tem o canal). A **duração do
+ensaio** (ms, s ou min; mínimo = Scan do datalogger) e o botão de iniciar ficam no card principal. A forma de exibir os resultados do pluviômetro
+(precipitação ou vazão/volume) fica em *Configurações → Exibição*. Nada disso altera a aquisição: o CR1000Xe mede os dois canais sempre.
 
 ## Como os dados entram
 
@@ -68,7 +74,8 @@ Tela: **Exibir** (Precipitação | Vazão) só muda a apresentação dos resulta
 | `/api/trials`, `/api/trials/<id>` | GET | ensaio em andamento (parcial), último encerrado e histórico; detalhe |
 | `/api/trials/start`, `/api/trials/stop` | POST* | inicia (`{"kind":"flow"\|"pluv"}`) / encerra o ensaio |
 | `/api/trials/<id>/raw.csv`, `/tips.csv` | GET | dados brutos do ensaio |
-| `/api/config` | GET / POST* | configuração (o GET não traz o endereço) |
+| `/api/config` | GET / POST* | configuração parcial (campo ausente preserva; o GET não traz o endereço) |
+| `/api/flow`, `/api/flow/method` | GET / POST* | estado do medidor (solicitado × ativo, canais, dado bruto); troca do método (409 em ensaio; 400 sem o canal no programa) |
 | `/api/reset-count` | POST* | zera a contagem exibida (histórico e ensaios mantidos) |
 | `/api/diag` | GET | latência, consultas, erros, lacunas, correspondência de tabelas |
 | `/export.csv`, `/export.xlsx`, `/export-eventos.csv` | GET | exportações |

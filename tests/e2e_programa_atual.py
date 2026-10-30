@@ -43,7 +43,7 @@ app = start(__import__("tempfile").gettempdir() + "/e2e_atual1.log"); time.sleep
 s, summ = api("/api/summary")
 ok("modo real: o servidor NAO se declara demonstracao", s == 200 and "demo" not in summ and summ["link"]["connected"] is True and summ["mode"] == "cr1000x")
 s, html = api("/")
-ok("interface fala em termopar tipo T e traz o indicador de dados reais", "termopar tipo T" in html and 'id="real"' in html and "PT100" not in html)
+ok("interface fala em termopar tipo T e traz o indicador de conexão com o datalogger (30/10: pill única #conn)", "termopar tipo T" in html and 'id="conn"' in html and "PT100" not in html)
 c = db(); n = c.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
 ok(f"historico do datalogger recuperado: {n} amostras (300 de backlog + as geradas)", n >= 300)
 lat = summ["latest"]

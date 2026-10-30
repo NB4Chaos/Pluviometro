@@ -127,3 +127,21 @@ def test_instancia_unica(tmp_path, monkeypatch, v4):
     h3 = app.single_instance(str(tmp_path / "servidor.lock"))
     assert h3 is not None
     app.release_instance(h3)
+
+
+def test_csv_bruto_do_ensaio_traz_pulsos_e_vazao_pelo_metodo_congelado(tmp_path, monkeypatch, v4):
+    """Regressão (30/10): /api/trials/<id>/raw.csv respondia 500 (SCOLS_LIST/flow_of_row acessados na instância, não no módulo)."""
+    app, c = boot(tmp_path, monkeypatch, v4, cfg={"flow_method": "pulse", "flow_k_value": 100, "flow_k_unit": "pulsos/L", "trial_duration_ms": 2000})
+    assert c.post("/api/trials/start", json={"kind": "flow"}).status_code == 200
+    for _ in range(4):
+        v4.tick(sleep=False); app.poll_once()
+    t = c.get("/api/trials").get_json()
+    tid = (t["last"] or t["running"])["id"]
+    if t["running"]:
+        c.post("/api/trials/stop", json={})
+    r = c.get(f"/api/trials/{tid}/raw.csv")
+    body = r.get_data(as_text=True)
+    assert r.status_code == 200 and "Pulsos (contagem no Scan)" in body and "método pulse" in body
+    lines = [l for l in body.splitlines() if l.strip()]
+    assert len(lines) >= 2 and lines[1].count(";") == lines[0].count(";")
+    assert c.get(f"/api/trials/{tid}/tips.csv").status_code == 200
