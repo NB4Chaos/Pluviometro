@@ -20,11 +20,12 @@
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></symbol>
   <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
 </svg>
 
 <header class="topbar"><div class="top">
   <div class="brand"><img src="/static/img/logo-elus.jpeg" alt="Grupo Elus" width="283" height="101"></div>
-  <nav class="nav" aria-label="Principal"><button data-v="dashboard">Dashboard</button><button data-v="graficos">Gráficos</button><button data-v="historico">Histórico</button><button data-v="config">Configurações</button></nav>
+  <nav class="nav" aria-label="Principal"><button data-v="dashboard">Dashboard</button><button data-v="graficos">Gráficos</button><button data-v="historico">Histórico</button><button data-v="padroes">Padrões</button><button data-v="config">Configurações</button></nav>
   <span class="pill" id="conn" role="status"><i class="dot"></i><span>Conectando…</span></span>
 </div></header>
 
@@ -57,7 +58,10 @@
 
   <article class="card" id="c-cor" aria-labelledby="cor-title" hidden><div class="glow" aria-hidden="true"></div>
    <div class="card-hd">
-    <span class="lbl" id="cor-title">Medidor de vazão</span>
+    <div class="std-wrap" id="std-wrap">
+     <button type="button" class="std-sel" id="std-sel" aria-haspopup="listbox" aria-expanded="false" aria-controls="std-menu" aria-label="Padrão de vazão selecionado"><span class="tag-id" id="cor-title">Medidor de vazão</span><span class="tag-sub">carregando…</span><svg class="ic chev" aria-hidden="true"><use href="#i-chev"/></svg></button>
+     <ul class="std-menu" id="std-menu" role="listbox" aria-label="Padrões cadastrados" hidden></ul>
+    </div>
     <div class="inst-tools">
      <span class="tag" id="cor-state" hidden></span>
      <div class="method" id="flow-method" role="group" aria-label="Método de aquisição da vazão" aria-describedby="flow-mstate">
@@ -119,14 +123,50 @@
  <div class="card"><div class="scroll"><table id="h-table" data-s="all"><thead><tr><th>Data e hora</th><th data-c="mass">Massa (<span id="h-unit">g</span>)</th><th data-c="temp">Temperatura (<span id="h-tunit">°C</span>)</th><th data-c="cor">Medidor (mA)</th><th data-c="cor">Pulsos (por Scan)</th><th data-c="cor">Vazão (<span id="h-funit">L/min</span>)</th><th data-c="cor">Método</th><th data-c="tips">Basculadas (total desde zerar)</th><th data-c="tips">Precip. desde zerar (mm)</th><th>Estado</th></tr></thead><tbody id="h-body"></tbody><tfoot><tr id="h-foot"></tr></tfoot></table></div>
   <div class="card-hd"><span class="note" id="h-count"></span><div class="meta"><button class="btn" id="h-prev">Anterior</button><button class="btn" id="h-next">Próxima</button></div></div></div>
  <div class="card"><div class="card-hd"><h2>Ensaios de calibração</h2><span class="note">Resultados congelados: não mudam com o tempo, nem com novas leituras ou mudanças de configuração.</span></div>
-  <div class="scroll"><table style="min-width:760px"><thead><tr><th>Início (datalogger)</th><th>Tipo</th><th>Estado</th><th>Duração</th><th>Motivo / observação</th><th></th></tr></thead><tbody id="tr-hist"></tbody></table></div>
+  <div class="scroll"><table style="min-width:860px"><thead><tr><th>Início (datalogger)</th><th>Tipo</th><th>Padrão</th><th>Estado</th><th>Duração</th><th>Motivo / observação</th><th></th></tr></thead><tbody id="tr-hist"></tbody></table></div>
   <div id="tr-detail" hidden></div></div>
  <div class="card"><div class="card-hd"><h2>Eventos de basculamento</h2><div class="meta"><span class="note" id="ev-count"></span><a class="btn" id="x-ev" href="#">Exportar eventos</a></div></div>
   <div class="scroll"><table style="min-width:560px"><thead><tr><th>Data e hora</th><th>Intervalo desde a anterior</th><th>Massa 3 s após (<span class="h-mu">g</span>)</th><th>Massa ejetada desde a anterior (<span class="h-mu">g</span>)</th></tr></thead><tbody id="ev-body"></tbody></table></div></div>
 </section>
 
+<section id="v-padroes" class="view">
+ <div class="card">
+  <div class="card-hd"><div><h2>Padrões de vazão</h2><p class="note">Cadastre cada medidor uma vez. No método Comparativo, escolha o padrão pela TAG no card principal e os parâmetros são carregados. O ensaio guarda uma cópia dos parâmetros usados: editar ou excluir aqui não altera ensaios já feitos.</p></div>
+   <div class="grp"><label class="inl">Buscar<input type="search" id="std-q" placeholder="TAG, marca, modelo ou SN" aria-label="Buscar padrão"></label><button class="btn y" id="std-new">Novo padrão</button></div></div>
+  <p class="note" id="std-list-msg" role="status"></p>
+  <div class="std-list" id="std-list"></div>
+ </div>
+ <form class="card" id="std-form" novalidate hidden>
+  <div class="card-hd"><h2 id="std-form-title">Novo padrão</h2><span class="note">Campos com * são obrigatórios</span></div>
+  <div class="cfg">
+   <label>TAG *<input type="text" id="sf-tag" maxlength="40" autocomplete="off" placeholder="ex.: PAD-VAZ-001"></label>
+   <label>Marca<input type="text" id="sf-brand" autocomplete="off"></label>
+   <label>Modelo<input type="text" id="sf-model" autocomplete="off"></label>
+   <label>Número de série (SN)<input type="text" id="sf-sn" autocomplete="off"></label>
+   <label>Fabricante<input type="text" id="sf-manufacturer" autocomplete="off"></label>
+   <label>Descrição<input type="text" id="sf-description" autocomplete="off"></label>
+   <label>Tipo de aquisição *<select id="sf-acq"><option value="pulse">Pulsos</option><option value="analog">Corrente 4–20 mA</option></select></label>
+  </div>
+  <div class="cfg" id="sf-pulse">
+   <label>Fator K *<div class="combo"><input type="text" id="sf-k_value" inputmode="decimal" autocomplete="off"><select id="sf-k_unit" aria-label="Unidade do fator K"><option>pulsos/L</option><option>pulsos/kg</option><option>pulsos/m³</option><option>L/pulso</option><option>mL/pulso</option></select></div><span class="help" id="sf-k-help"></span></label>
+   <label>Configuração da saída de pulsos<input type="text" id="sf-pulse_cfg" autocomplete="off" placeholder="ex.: passiva, 10 kHz máx., pull-up externo 2,2 kΩ"></label>
+  </div>
+  <div class="cfg" id="sf-analog" hidden>
+   <label>Valor em 4 mA *<input type="text" id="sf-q4" inputmode="decimal" autocomplete="off"></label>
+   <label>Valor em 20 mA *<input type="text" id="sf-q20" inputmode="decimal" autocomplete="off"></label>
+   <label>Unidade da vazão<select id="sf-range_unit"><optgroup label="Volumétrica"><option>L/min</option><option>L/h</option><option>mL/min</option><option>mL/s</option><option>m³/h</option><option>m³/s</option><option>m³/min</option></optgroup><optgroup label="Mássica"><option>kg/h</option><option>kg/s</option></optgroup></select></label>
+   <label>Tipo de sinal<input type="text" id="sf-signal_type" autocomplete="off" placeholder="ex.: 4–20 mA passivo, 2 fios"></label>
+  </div>
+  <label>Observações técnicas<input type="text" id="sf-notes" autocomplete="off"></label>
+  <div class="grp"><button type="submit" class="btn y" id="std-save">Salvar padrão</button><button type="button" class="btn" id="std-cancel">Cancelar</button><span class="note" id="std-msg" role="status" aria-live="polite"></span></div>
+ </form>
+</section>
+
 <section id="v-config" class="view">
  <div class="cfg">
+  <div class="card"><h2>Ensaio</h2>
+   <label>Resolução do tempo<select id="cf-tres"><option value="100">0,1 s</option><option value="10">0,01 s</option><option value="1">0,001 s</option></select></label>
+   <p class="note" id="cf-tres-eff"></p></div>
   <div class="card"><h2>Pluviômetro</h2>
    <label>Resolução do pluviômetro (mm/basculada)<input type="text" inputmode="decimal" id="cf-res"></label>
    <label>Área de captação (cm²)<input type="text" inputmode="decimal" id="cf-area"></label></div>
@@ -171,15 +211,9 @@
    <div class="panel" role="tabpanel" id="pan-pulse" aria-labelledby="tab-pulse" tabindex="0">
     <div class="field">
      <label for="fk-val">Fator K</label>
-     <div class="combo"><input type="text" id="fk-val" inputmode="decimal" autocomplete="off" aria-describedby="fk-help fk-err"><select id="fk-unit" aria-label="Unidade do fator K"><option>pulsos/L</option><option>pulsos/m³</option><option>L/pulso</option><option>mL/pulso</option></select></div>
-     <p class="help" id="fk-help">O valor configurado na saída de pulsos do medidor: volume por pulso, ou f<sub>max</sub> ÷ Q<sub>max</sub> (em L/s) no modo frequência. Não existe K padrão; vazio = vazão por pulsos indisponível. A contagem bruta é mostrada mesmo sem K.</p>
+     <div class="combo"><input type="text" id="fk-val" inputmode="decimal" autocomplete="off" aria-describedby="fk-help fk-err"><select id="fk-unit" aria-label="Unidade do fator K"><option>pulsos/L</option><option>pulsos/kg</option><option>pulsos/m³</option><option>L/pulso</option><option>mL/pulso</option></select></div>
+     <p class="help" id="fk-help">Normalmente carregado do padrão selecionado no card. pulsos/kg é grandeza mássica: N ÷ K dá massa; o volume só sai com a densidade da água configurada. Vazio = vazão por pulsos indisponível; a contagem bruta é mostrada mesmo sem K.</p>
      <p class="err" id="fk-err" hidden></p>
-    </div>
-    <div class="field">
-     <label for="fk-unc">Incerteza do fator K (%) <span class="help" style="display:inline">opcional</span></label>
-     <input type="text" id="fk-unc" inputmode="decimal" autocomplete="off" aria-describedby="fk-unc-help fk-unc-err">
-     <p class="help" id="fk-unc-help">Incerteza relativa do K segundo o certificado do medidor. Vazio = não informada: a incerteza da vazão mostra só a contagem (±1 pulso) e o relógio do datalogger, e diz que K não entrou.</p>
-     <p class="err" id="fk-unc-err" hidden></p>
     </div>
     <dl class="derived" id="fk-derived"></dl>
    </div>
@@ -229,7 +263,8 @@
 <script src="/static/js/api.js?v=2026.10.31"></script>
 <script src="/static/js/charts.js?v=2026.10.31"></script>
 <script src="/static/js/trials.js?v=2026.10.31"></script>
-<script src="/static/js/flow.js?v=2026.10.31"></script>
-<script src="/static/js/app.js?v=2026.10.31"></script>
+<script src="/static/js/flow.js?v=2026.11.01"></script>
+<script src="/static/js/standards.js?v=2026.11.01"></script>
+<script src="/static/js/app.js?v=2026.11.01"></script>
 </body>
 </html>

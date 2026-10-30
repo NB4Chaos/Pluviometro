@@ -42,6 +42,9 @@ class Reading:
     flow_ma_code: int | None = None       # codigo bruto do canal analogico (Flow_Status)
     flow_pulse_code: int | None = None    # codigo bruto do canal de pulsos (Flow_PStatus)
     flow_dt_ms: int | None = None         # janela de contagem: intervalo ate o registro anterior da tabela do medidor
+    flow_t1_ms: int | None = None         # v5: ms, dentro do segundo do registro, do 1o sub-Scan com pulsos (Timer do datalogger); None = sem pulsos/sem campo
+    flow_t2_ms: int | None = None         # v5: idem, do ultimo sub-Scan com pulsos
+    flow_tres_ms: int | None = None       # v5: intervalo do Scan rapido (resolucao efetiva dos carimbos de pulso); None = programa sem temporizacao fina
     flow_has: tuple = ()                  # canais que o programa fornece: ("analog", "pulse")
     ts: int | None = None       # horário da medição em ms; None = agora (dados históricos recuperados trazem o próprio horário)
     sample: bool = True         # False = só carrega eventos (sem linha de medição)
@@ -277,7 +280,7 @@ class CR1000X(Datalogger):
                 bad = "status" in P["cor"] and int(_num(cv.get(P["cor"]["status"])) or 0) in P["cor"].get("status_bad", [])
                 cs = "ok" if ma is not None and not bad else "no_comm"
                 ma = ma if cs == "ok" else None
-        mode = pulses = hz = ptot = mcode = pcode = dt = None
+        mode = pulses = hz = ptot = mcode = pcode = dt = t1 = t2 = tres = None
         has = self.flow_has
         fl = P.get("flow")
         if fl:   # medidor de vazao: canal 4-20 mA e, se o programa tiver, canal de pulsos, tudo da MESMA tabela e SEM classificar aqui
@@ -295,12 +298,15 @@ class CR1000X(Datalogger):
                     pulses = _num(fv.get(fl["pulses"]))
                     ptot = _int(fv.get(fl.get("pulses_total", "")))
                     pcode = _int(fv.get(fl.get("pulse_status", "")))
+                    if fl.get("t_first") and fl["t_first"] in names:   # v5: carimbos do Timer do datalogger dentro do segundo
+                        t1, t2 = _int(fv.get(fl["t_first"])), _int(fv.get(fl.get("t_last", "")))
+                        tres = _int(fv.get(fl.get("timing_res", "")))
                 if fl.get("freq") and fl["freq"] in names:   # programas antigos que gravavam a frequencia pronta
                     hz = _num(fv.get(fl["freq"]))
                 dt = fv.get("__dt_ms")
         return Reading(mass_g=mass, temp_c=temp, mass_status=ms, temp_status=ts_, cor_ma=ma, cor_status=cs, ts=ts,
                        flow_mode=mode, flow_pulses=pulses, flow_hz=hz, flow_pulses_total=ptot, flow_ma_code=mcode,
-                       flow_pulse_code=pcode, flow_dt_ms=dt, flow_has=has)
+                       flow_pulse_code=pcode, flow_dt_ms=dt, flow_t1_ms=t1, flow_t2_ms=t2, flow_tres_ms=tres, flow_has=has)
 
     def read(self):
         P = self.profile

@@ -12,14 +12,16 @@ const Api = {
     if (!r.ok) throw new Error(r.status);
     return r.json();
   },
-  async post(url, body = {}, retried = false) {
+  put(url, body = {}) { return this.post(url, body, false, 'PUT'); },
+  del(url) { return this.post(url, {}, false, 'DELETE'); },
+  async post(url, body = {}, retried = false, method = 'POST') {
     const h = { 'Content-Type': 'application/json' }, t = Tok.get();
     if (t) h['X-Dashboard-Token'] = t;
-    const r = await fetch(url, { method: 'POST', headers: h, body: JSON.stringify(body) });
+    const r = await fetch(url, { method, headers: h, body: JSON.stringify(body) });
     if (r.status === 401 && !retried) {
       Tok.clear();
       const v = window.prompt('Este servidor exige um token de acesso para alterar configurações ou controlar ensaios. Informe o token:');
-      if (v) { Tok.set(v.trim()); return this.post(url, body, true); }
+      if (v) { Tok.set(v.trim()); return this.post(url, body, true, method); }
     }
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));

@@ -15,7 +15,8 @@ Documentação: `docs/DIAGNOSTICO.md` (problemas, alterações, desempenho), `do
 `docs/MAPA_VARIAVEIS.md`, `docs/CHECKLIST.md` (validação no equipamento), `docs/PESQUISA.md` (arquitetura e fontes),
 `docs/DESEMPENHO_BACKEND.md` (otimização do backend: antes × depois), `docs/DIAGNOSTICO_2026-10-31.md` e `docs/ENTREGA_2026-10-31.md`
 (refinamento sobre o pacote do TI: tipografia original, pulsos brutos como valor principal, card principal dinâmico, duração em ms, temporização),
-`docs/CADEIA_VAZAO_2026-10-31.md` (cadeia pulsos → N → volume → tempo efetivo → vazão → frequência → incerteza: investigação, correções e testes).
+`docs/CADEIA_VAZAO_2026-10-31.md` (cadeia pulsos → N → volume → tempo efetivo → vazão → frequência: investigação, correções e testes),
+`docs/ENTREGA_2026-11-01.md` (aba Padrões, seletor por TAG no card, K em pulsos/kg, resolução de tempo configurável e programa v5 com `Timer`; sem cálculo de incerteza).
 
 ## Instalação e execução (Windows)
 
@@ -114,4 +115,4 @@ python tests\e2e_cr1000x_elus_calib.py
 
 Usam emuladores com dados fictícios e pasta de dados temporária (não tocam nos seus dados). O emulador reproduz os esquemas reais da
 tabela `Vazao1s` (v3 e v4) e o comportamento da API que causava as falsas "tabelas reiniciadas". **Nenhum teste foi feito contra um
-CR1000Xe real.** Resultado da última execução: `docs/ENTREGA_2026-10-31.md` (fase anterior: `docs/ENTREGA_2026-10-28.md`).
+CR1000Xe real.** Resultado da última execução: `docs/ENTREGA_2026-11-01.md` (fases anteriores: `docs/ENTREGA_2026-10-31.md`, `docs/ENTREGA_2026-10-28.md`).

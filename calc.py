@@ -83,30 +83,8 @@ def window_coverage(sample_ts, start, end, **kw):
     return _coverage(covered_intervals(sample_ts, start, end, **kw), start, end)
 
 
-# ---------------------------------------------------------------- incerteza da vazão por pulsos (só o que é demonstrável)
-CLOCK_REL = 3.0 / (365.25 * 24 * 60)   # exatidão do relógio do CR1000X: ±3 min/ano (0–40 °C) [especificação Campbell] ≈ 5,7 ppm
-
-
-def pulse_uncertainty(n, k_pulses_per_l, span_s, k_rel_pct=None):
-    """Incerteza-padrão relativa (%) de V = N/K e Q = N/(K·t) por pulsos, com as componentes que o sistema CONHECE:
-      pulsos : a contagem é exata dentro da janela, mas a fase dos pulsos nas bordas vale ±1 pulso (distribuição retangular → 1/√3)
-      relógio: deriva do relógio do datalogger (especificação), que afeta só o tempo t
-      K      : incerteza do fator K informada pelo operador/certificado (%); None = NÃO incluída (nunca presumida)
-    Combinação em quadratura. Devolve None quando N é 0 (sem pulsos não há vazão a qualificar)."""
-    if not n or n <= 0 or span_s is None or span_s <= 0:
-        return None
-    u_n = 100.0 / (n * math.sqrt(3.0))
-    u_c = 100.0 * CLOCK_REL
-    u_k = float(k_rel_pct) if k_rel_pct is not None and k_rel_pct >= 0 else None
-    comb_v = math.sqrt(u_n ** 2 + (u_k or 0.0) ** 2)
-    comb_q = math.sqrt(u_n ** 2 + u_c ** 2 + (u_k or 0.0) ** 2)
-    out = {"pulses_rel_pct": u_n, "clock_rel_pct": u_c, "k_rel_pct": u_k, "k_included": u_k is not None,
-           "volume_rel_pct": comb_v, "flow_rel_pct": comb_q, "volume_u_l": None, "flow_u_l_min": None}
-    if k_pulses_per_l and k_pulses_per_l > 0:
-        v = n / k_pulses_per_l
-        out["volume_u_l"] = v * comb_v / 100.0
-        out["flow_u_l_min"] = (v / span_s * 60.0) * comb_q / 100.0
-    return out
+# (sem cálculo de incerteza no sistema, por decisão do laboratório em 31/10: a avaliação metrológica é feita na planilha,
+#  a partir dos dados brutos, do tempo efetivo e dos parâmetros congelados que o ensaio registra)
 
 
 def _coverage(iv, start, end):
@@ -238,11 +216,17 @@ def gravimetric(m0_g, m1_g, t0_ms, t1_ms, density_g_cm3, area_cm2, pulses=None, 
 # Unidade interna do fator K: pulsos por litro. "Volume por pulso" é como o MAG 5000 configura a saída de pulsos.
 #   pulsos/L  -> K                 pulsos/m³ -> K / 1000
 #   L/pulso   -> 1 / V             mL/pulso  -> 1000 / V
-K_UNITS = {"pulsos/L": ("k", 1.0), "pulsos/m³": ("k", 1e-3), "L/pulso": ("v", 1.0), "mL/pulso": ("v", 1e-3)}
+#   pulsos/kg -> grandeza MÁSSICA: N ÷ K dá massa (kg). Só vira volume com a densidade configurada (g/cm³ = kg/L):
+#   K(pulsos/L) = K(pulsos/kg) × ρ(kg/L). Sem densidade, a vazão volumétrica fica indisponível (nunca presumida).
+K_UNITS = {"pulsos/L": ("k", 1.0), "pulsos/m³": ("k", 1e-3), "L/pulso": ("v", 1.0), "mL/pulso": ("v", 1e-3), "pulsos/kg": ("m", 1.0)}
 
 
-def k_to_pulses_per_l(value, unit="pulsos/L"):
-    """Fator K como o operador digitou -> pulsos/L. None se ausente, não finito, ≤ 0 ou unidade desconhecida (nunca um K presumido)."""
+def k_is_mass(unit):
+    return unit in K_UNITS and K_UNITS[unit][0] == "m"
+
+
+def k_to_pulses_per_l(value, unit="pulsos/L", density_g_cm3=None):
+    """Fator K como o operador digitou -> pulsos/L. None se ausente, não finito, ≤ 0, unidade desconhecida ou (pulsos/kg) sem densidade."""
     if value is None or unit not in K_UNITS:
         return None
     try:
@@ -252,14 +236,18 @@ def k_to_pulses_per_l(value, unit="pulsos/L"):
     if not math.isfinite(v) or v <= 0:
         return None
     kind, f = K_UNITS[unit]
+    if kind == "m":
+        return v * f * density_g_cm3 if density_g_cm3 and density_g_cm3 > 0 else None
     return v * f if kind == "k" else 1.0 / (v * f)
 
 
-def k_from_pulses_per_l(k_l, unit="pulsos/L"):
-    """Inverso de k_to_pulses_per_l: pulsos/L -> valor na unidade de exibição."""
+def k_from_pulses_per_l(k_l, unit="pulsos/L", density_g_cm3=None):
+    """Inverso de k_to_pulses_per_l: pulsos/L -> valor na unidade de exibição (pulsos/kg exige densidade)."""
     if not k_l or k_l <= 0 or unit not in K_UNITS:
         return None
     kind, f = K_UNITS[unit]
+    if kind == "m":
+        return k_l / (f * density_g_cm3) if density_g_cm3 and density_g_cm3 > 0 else None
     return k_l / f if kind == "k" else 1.0 / (k_l * f)
 
 
@@ -402,7 +390,7 @@ def flow_reading(method, has, comm, ma, pulses, pulse_code, dt_ms, cfg):
             return out
         out["hz"] = pulses / w
         if not k or k <= 0:
-            out.update(state="unconfigured", reason="fator K não configurado")
+            out.update(state="unconfigured", reason=cfg.get("k_reason") or "fator K não configurado")
             return out
         out.update(state="ok", lmin=out["hz"] / k * 60.0)
         return out

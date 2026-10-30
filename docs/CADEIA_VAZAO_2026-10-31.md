@@ -71,7 +71,12 @@ frequência; o volume continuaria vindo do contador. Exige novo programa e valid
 - Entrada P2: ±20 V, pull-up interno de 100 kΩ (fora da carga 200 Ω–10 kΩ exigida pelo medidor → pull-up externo); frequência máxima do medidor 10 kHz.
 - O tempo de parede do servidor (polling, Socket.IO) **não entra** em nenhum cálculo: só é registrado como informação (`timing.wall_ms`).
 
-## 11. Alterações na apresentação da incerteza
+## 11. Alterações na apresentação da incerteza — REMOVIDAS em 01/11
+Por decisão do laboratório, o sistema **não calcula incerteza** (nem combinada, nem expandida, nem componentes). Tudo o que esta seção descreve
+foi retirado em 01/11/2026 (`docs/ENTREGA_2026-11-01.md`, item 1); a avaliação de incerteza é feita na planilha a partir dos dados brutos,
+do tempo efetivo e dos parâmetros congelados do ensaio. O texto abaixo fica só como registro do que existiu entre 31/10 e 01/11.
+
+### (histórico) Alterações na apresentação da incerteza
 Novo `calc.pulse_uncertainty(N, K, t, u_K%)`, gravado em `flow.uncertainty` do ensaio por pulsos:
 - contagem: u = 1/(N·√3) (±1 pulso, retangular); relógio: 5,7 ppm; **K: só se informado** (campo opcional "Incerteza do fator K (%)" no painel do medidor,
   `flow_k_uncertainty_pct`); combinação em quadratura; u(V) sem a parcela do relógio.

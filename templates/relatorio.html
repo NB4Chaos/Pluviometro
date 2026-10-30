@@ -20,7 +20,7 @@
 </style>
 </head>
 <body>
-<div class="top noprint"><span class="sub">Este relatório contém o que foi adquirido, os parâmetros usados e a incerteza-padrão das componentes conhecidas pelo sistema (contagem, relógio, K informado). Incerteza expandida, demais componentes e rastreabilidade são tratadas na planilha.</span><button class="btn" onclick="window.print()">Imprimir / salvar PDF</button></div>
+<div class="top noprint"><span class="sub">Este relatório contém só o que foi adquirido, o tempo efetivo e os parâmetros usados. A avaliação de incerteza e a rastreabilidade são feitas na planilha de calibração.</span><button class="btn" onclick="window.print()">Imprimir / salvar PDF</button></div>
 <div id="r"><p class="sub">Carregando…</p></div>
 <script>
 const $ = s => document.querySelector(s), p2 = n => String(n).padStart(2, '0');
@@ -34,7 +34,8 @@ const any = v => v == null ? '—' : v.toLocaleString('pt-BR', { maximumFraction
 const dur = ms => { if (ms == null || isNaN(ms)) return '—'; ms = Math.max(0, Math.round(ms)); if (ms < 1000) return `${ms} ms`; if (ms < 60000) return `${any(ms / 1000)} s`;
   const m = Math.floor(ms / 60000), s = (ms - m * 60000) / 1000; return `${m}:${Number.isInteger(s) ? String(s).padStart(2, '0') : (s < 10 ? '0' : '') + any(s)}`; };
 const STATE = { completed: ['Concluído', 'ok'], incomplete: ['Incompleto', 'warn'], interrupted: ['Interrompido', 'err'], running: ['Em andamento', 'warn'] };
-const KIND = { pluv: 'Pluviômetro × balança (gravimétrico)', flow: 'Medidor de vazão × balança (comparativo)' };
+const KIND = { pluv: 'Pluviômetro × balança (gravimétrico)', flow: 'Medidor de vazão (comparativo, padrão de vazão)' };
+const durRes = (ms, res) => { if (ms == null) return '—'; const d = res >= 1000 ? 0 : res >= 100 ? 1 : res >= 10 ? 2 : 3; return (ms / 1000).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d }) + ' s'; };
 const row = (k, v, u = '') => `<tr><th>${k}</th><td>${v}${u && v !== '—' ? ' ' + u : ''}</td></tr>`;
 (async () => {
   const id = location.pathname.split('/').pop();
@@ -45,33 +46,36 @@ const row = (k, v, u = '') => `<tr><th>${k}</th><td>${v}${u && v !== '—' ? ' '
   document.title = `Ensaio ${t.id} · Elus`;
   let h = `<h1>Relatório de aquisição · Ensaio ${t.id}</h1><p class="sub">Monitor de calibração de pluviômetros · Elus Instrumentação · gerado em ${dt(Date.now())}</p>`;
   h += `<h2>Identificação</h2><table>${row('Tipo de ensaio', KIND[t.kind] || t.kind)}${row('Estado', `<b class="${cls}">${lab}</b>${t.reason ? ' · ' + t.reason : ''}`)}
-    ${row('Início (hora do datalogger)', stamp(t.start_ts))}${row('Fim (hora do datalogger)', stamp(t.end_ts))}${row('Duração configurada', dur(cfgMs) + ' (' + cfgMs.toLocaleString('pt-BR') + ' ms)')}
-    ${row('Janela do ensaio', dur(win) + ' (' + win.toLocaleString('pt-BR') + ' ms)')}${row('Intervalo da referência (1ª → última leitura válida de massa)', num(g.duration_s, 1), 's')}
+    ${row('Início (hora do datalogger)', stamp(t.start_ts - 1))}${row('Fim (hora do datalogger)', stamp(t.end_ts - 1))}${row('Duração configurada', dur(cfgMs) + ' (' + cfgMs.toLocaleString('pt-BR') + ' ms)')}
+    ${row('Janela do ensaio', dur(win) + ' (' + win.toLocaleString('pt-BR') + ' ms)')}${t.kind !== 'flow' ? row('Intervalo da referência (1ª → última leitura válida de massa)', num(g.duration_s, 1), 's') : ''}
     ${row('Amostras na janela / cobertas', `${q.rows ?? '—'} · ${num(q.covered_s, 0)} s de ${num(q.window_s, 0)} s${q.gaps ? ` · ${q.gaps} lacuna(s)` : ''}`)}
-    ${row('Leituras de massa válidas', g.mass_valid_fraction == null ? '—' : num(100 * g.mass_valid_fraction, 0) + ' %')}</table>`;
-  if (tm) h += `<h2>Temporização (carimbos do datalogger)</h2><table>${row('Tempo efetivo (1º → último registro + Scan)', tm.eff_ms == null ? '—' : dur(tm.eff_ms) + ' (' + tm.eff_ms.toLocaleString('pt-BR') + ' ms)')}
-    ${row('Diferença efetivo − configurado', tm.diff_ms == null ? '—' : (tm.diff_ms > 0 ? '+' : '') + tm.diff_ms.toLocaleString('pt-BR') + ' ms')}${row('Resolução (Scan do datalogger)', tm.resolution_ms, 'ms')}
-    ${row('Registros no ensaio', tm.samples)}${row('Primeiro registro', stamp(tm.first_sample_ts))}${row('Último registro', stamp(tm.last_sample_ts))}${tm.wall_ms != null ? row('Tempo de parede (servidor, informativo)', dur(tm.wall_ms)) : ''}</table>`;
+    ${t.kind !== 'flow' ? row('Leituras de massa válidas', g.mass_valid_fraction == null ? '—' : num(100 * g.mass_valid_fraction, 0) + ' %') : ''}</table>`;
+  if (tm) { const R0 = tm.display_res_ms || tm.resolution_ms || 1000;
+    h += `<h2>Tempo (carimbos do datalogger)</h2><table>${row('Tempo efetivo coberto pelos registros (1º → último + Scan)', tm.eff_ms == null ? '—' : durRes(tm.eff_ms, R0) + ' (' + tm.eff_ms.toLocaleString('pt-BR') + ' ms)')}
+    ${tm.pulse_eff_ms != null ? row('Tempo efetivo dos pulsos (1º → último sub-Scan com pulsos, Timer)', durRes(tm.pulse_eff_ms, R0) + ' (' + tm.pulse_eff_ms.toLocaleString('pt-BR') + ' ms)') + row('Início / fim dos pulsos', `${dtms(tm.first_pulse_ts)} → ${dtms(tm.last_pulse_ts)}`) : ''}
+    ${row('Diferença efetivo − configurado', tm.diff_ms == null ? '—' : (tm.diff_ms > 0 ? '+' : '') + tm.diff_ms.toLocaleString('pt-BR') + ' ms')}
+    ${row('Resolução efetiva', `${tm.resolution_ms} ms (${tm.res_source === 'timer' ? 'Timer do datalogger, Scan rápido' : 'Scan do programa'})`)}${tm.requested_res_ms ? row('Resolução escolhida na interface', `${tm.requested_res_ms} ms${tm.requested_res_ms < tm.resolution_ms ? ' (não alcançada pelo programa carregado)' : ''}`) : ''}
+    ${row('Registros no ensaio', tm.samples)}${row('Primeiro registro', stamp(tm.first_sample_ts))}${row('Último registro', stamp(tm.last_sample_ts))}${tm.wall_ms != null ? row('Tempo de parede (servidor, informativo)', dur(tm.wall_ms)) : ''}</table>`; }
   h += `<h2>Parâmetros usados (congelados no início do ensaio)</h2><table>${row('Resolução do pluviômetro', num(c.res_mm, 3), 'mm/basculada')}${row('Área de captação', num(c.area_cm2, 1), 'cm²')}
     ${row('Densidade da água', num(c.density, 4), 'g/cm³')}${f ? row('Método do medidor', METHOD[c.flow_method] || (c.flow_method ? c.flow_method : 'não registrado (ensaio anterior à escolha de método)'))
-      + row('Fator K', c.k_pulses_per_l == null ? 'não configurado' : `${sig(c.k_pulses_per_l)} pulsos/L`) + row('Faixa 4–20 mA', c.q4 == null ? '—' : `${num(c.q4, 3)} → ${num(c.q20, 3)} ${c.range_unit}`)
+      + row('Fator K', c.k_input != null ? `${sig(c.k_input)} ${c.k_unit || 'pulsos/L'}${c.k_unit === 'pulsos/kg' ? (c.k_pulses_per_l ? ` (= ${sig(c.k_pulses_per_l)} pulsos/L com ρ = ${num(c.density, 4)} g/cm³)` : ' (sem densidade: só massa)') : ''}` : c.k_pulses_per_l == null ? 'não configurado' : `${sig(c.k_pulses_per_l)} pulsos/L`) + row('Faixa 4–20 mA', c.q4 == null ? '—' : `${num(c.q4, 3)} → ${num(c.q20, 3)} ${c.range_unit}`)
       + row('Tolerância nos limites de 4 e 20 mA', c.ma_tol == null ? '0 (critério exato)' : num(c.ma_tol, 3), 'mA') : ''}</table>`;
-  h += `<div class="two"><div><h2>Pluviômetro (instrumento)</h2><table>${row('Basculadas no intervalo', g.pulses_window ?? '—')}${row('Precipitação indicada', num(g.pluv_precip_mm, 3), 'mm')}
+  const std = c.standard;   // comparativo: padrão congelado no ensaio (a cópia, não o cadastro atual)
+  if (t.kind === 'flow' && std) h += `<h2>Padrão de vazão utilizado</h2><table>${row('TAG', `<b>${std.tag}</b>`)}${row('Marca | modelo', [std.brand, std.model].filter(Boolean).join(' | ') || '—')}${row('Número de série', std.sn || '—')}
+    ${row('Fabricante', std.manufacturer || '—')}${row('Tipo de aquisição', std.acq === 'pulse' ? 'pulsos' : 'corrente 4–20 mA')}${std.acq === 'pulse' ? row('Fator K cadastrado', `${sig(std.k_value)} ${std.k_unit}`) : row('Faixa cadastrada', `${num(std.q4, 3)} → ${num(std.q20, 3)} ${std.range_unit}`)}</table>`;
+  if (t.kind !== 'flow') h += `<div class="two"><div><h2>Pluviômetro (instrumento)</h2><table>${row('Basculadas no intervalo', g.pulses_window ?? '—')}${row('Precipitação indicada', num(g.pluv_precip_mm, 3), 'mm')}
     ${row('Intensidade indicada', num(g.pluv_intensity_mm_h, 2), 'mm/h')}${row('Volume equivalente', num(g.pluv_precip_mm != null && c.area_cm2 ? g.pluv_precip_mm * c.area_cm2 / 10 : null, 1), 'mL')}</table></div>
     <div><h2>Balança (referência)</h2><table>${row('Massa inicial → final', g.mass_start_g == null ? '—' : `${num(g.mass_start_g, 1)} → ${num(g.mass_end_g, 1)}`, 'g')}${row('Massa de água coletada (Δm)', num(g.delta_mass_g, 1), 'g')}
     ${row('Volume (Δm ÷ ρ)', num(g.volume_ml, 1), 'mL')}${row('Precipitação equivalente', num(g.precip_ref_mm, 3), 'mm')}${row('Intensidade equivalente', num(g.intensity_ref_mm_h, 2), 'mm/h')}${row('Vazão equivalente', num(g.flow_ref_l_min, 4), 'L/min')}</table></div></div>`;
-  if (f) { const v = f.vs_reference || {}, fl = f.flow_l_min || {};
-    const o = f.other;
-    h += `<h2>Medidor de vazão</h2><table>${row('Método', METHOD[f.mode] || f.mode)}${row('Leituras válidas', `${f.n_valid}/${f.n_rows}`)}${row('Vazão média / mín / máx', `${num(fl.mean, 4)} / ${num(fl.min, 4)} / ${num(fl.max, 4)}`, 'L/min')}
-      ${row('Volume do medidor (mesmo intervalo)', num(v.volume_meter_l, 4), 'L')}${row('Volume pela balança (mesmo intervalo)', num(v.volume_ref_l, 4), 'L')}${row('Erro do medidor', num(v.error_pct, 2), '%')}
+  if (f && t.kind === 'flow') { const fl = f.flow_l_min || {}, mass = f.k_basis === 'mass', R = tm ? tm.display_res_ms : 1000;
+    h += `<h2>Medidor de vazão</h2><table>${row('Aquisição', METHOD[f.mode] || f.mode)}${row('Leituras válidas', `${f.n_valid}/${f.n_rows}`)}
+      ${f.mode === 'pulse' && f.k_input != null ? row('Fator K usado', `${sig(f.k_input)} ${f.k_unit}`) : ''}${mass ? row('Massa calculada (N ÷ K)', num(f.mass_kg, 4), 'kg') + row('Vazão mássica (massa ÷ Δt)', num(f.mass_flow_kg_min, 4), 'kg/min') : ''}
+      ${row(mass ? 'Volume (massa ÷ ρ, convertido)' : f.mode === 'pulse' ? 'Volume (N ÷ K)' : 'Volume (∫ vazão)', num(f.volume_l, 4), 'L')}${row(mass ? 'Vazão média / mín / máx (convertida com ρ)' : 'Vazão média / mín / máx', `${num(fl.mean, 4)} / ${num(fl.min, 4)} / ${num(fl.max, 4)}`, 'L/min')}
+      ${tm && tm.pulse_eff_ms != null ? row('Tempo efetivo dos pulsos (Timer do datalogger)', durRes(tm.pulse_eff_ms, R) + ` (resolução ${tm.resolution_ms} ms)`) : ''}
       ${f.pulses_total != null ? row('Pulsos brutos (N)', f.pulses_total.toLocaleString('pt-BR') + (f.count_method ? ` (${f.count_method === 'acumulado' ? 'diferença do contador acumulado do datalogger' : 'soma dos registros'}${f.pulses_sum != null && f.pulses_sum !== f.pulses_total ? `; soma dos registros = ${f.pulses_sum.toLocaleString('pt-BR')}` : ''})` : '')) : ''}
-      ${f.time_eff_ms != null ? row('Tempo efetivo da contagem (Δt)', dur(f.time_eff_ms) + ' (' + f.time_eff_ms.toLocaleString('pt-BR') + ' ms)') : ''}${f.freq_mean_hz != null ? row('Frequência média (N ÷ Δt)', num(f.freq_mean_hz, 2), 'Hz') : ''}
-      ${f.mode === 'pulse' ? row('Vazão média calculada (N ÷ K ÷ Δt)', num(fl.mean, 4), 'L/min') + row('Volume calculado (N ÷ K)', num(f.volume_l, 4), 'L') : ''}
-      ${f.uncertainty ? row('Incerteza-padrão relativa da vazão', `${sig(f.uncertainty.flow_rel_pct, 2)} % (contagem ±1 pulso: ${sig(f.uncertainty.pulses_rel_pct, 2)} %; relógio: ${sig(f.uncertainty.clock_rel_pct, 2)} %; K: ${f.uncertainty.k_included ? sig(f.uncertainty.k_rel_pct, 2) + ' %' : 'não informada, não incluída'})`)
-        + (f.uncertainty.flow_u_l_min != null ? row('Vazão média ± u', `${num(fl.mean, 4)} ± ${sig(f.uncertainty.flow_u_l_min, 2)}`, 'L/min') + row('Volume ± u', `${num(f.volume_l, 4)} ± ${sig(f.uncertainty.volume_u_l, 2)}`, 'L') : '') : ''}
+      ${f.time_eff_ms != null ? row('Tempo efetivo da contagem (Δt)', durRes(f.time_eff_ms, R) + ' (' + f.time_eff_ms.toLocaleString('pt-BR') + ' ms, ' + (f.time_source === 'timer' ? 'Timer do datalogger' : 'registros de 1 s') + ')') : ''}${f.freq_mean_hz != null ? row('Frequência média (N ÷ Δt)', num(f.freq_mean_hz, 2), 'Hz') : ''}
       ${f.resolution_pct != null ? row('Resolução da contagem (1 pulso)', sig(f.resolution_pct, 2), '%') : ''}${f.ma ? row('Corrente média', num(f.ma.mean, 3), 'mA') : ''}
-      ${f.n_clamped ? row('Leituras no limite de 4 ou 20 mA (dentro da tolerância)', f.n_clamped) : ''}
-      ${o ? row(`Outro canal (${METHOD[o.method]}), mesmo intervalo`, `${num(o.volume_l, 4)} L · diferença ${num(o.diff_pct, 2)} %`) : ''}</table>`; }
+      ${f.n_clamped ? row('Leituras no limite de 4 ou 20 mA (dentro da tolerância)', f.n_clamped) : ''}</table>`; }
   if (tp) h += `<h2>Temperatura da água</h2><table>${row('Média / mín / máx', `${num(tp.mean_c, 2)} / ${num(tp.min_c, 2)} / ${num(tp.max_c, 2)}`, '°C')}${row('Leituras', tp.n)}</table>`;
   const issues = [...(q.reasons || []), ...(g.issues || []), ...((f && f.issues) || [])];
   h += `<h2>Ocorrências durante a aquisição</h2>${issues.length ? '<ul>' + [...new Set(issues)].map(i => `<li class="err">${i}</li>`).join('') + '</ul>' : '<p class="ok">Nenhuma.</p>'}`;

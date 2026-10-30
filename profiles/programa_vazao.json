@@ -1,6 +1,6 @@
 {
   "nome": "programa_vazao",
-  "descricao": "Pluviometria v3/v4 com medidor de vazao: Balanca1s, Termopar1s, Pluviometro1s + Vazao1s (4-20 mA em RG1; pulsos em P2 so na v4). Os campos de pulso sao opcionais: o servidor detecta pelo cabecalho da tabela se o programa carregado os tem.",
+  "descricao": "Pluviometria v3/v4/v5 com medidor de vazao: Balanca1s, Termopar1s, Pluviometro1s + Vazao1s (4-20 mA em RG1; pulsos em P2 na v4; na v5 tambem os carimbos Flow_T1_ms/Flow_T2_ms do Timer e o Scan rapido Flow_ScanF_ms). Campos opcionais: o servidor detecta pelo cabecalho da tabela o que o programa carregado tem.",
   "mass": {"table": "Balanca1s", "value": "Peso_g", "factor": 1.0,
            "status": "StatusBal", "status_map": {"0": "ok", "1": "no_comm", "2": "invalid", "3": "invalid", "4": "invalid"}},
   "temp": {"table": "Termopar1s", "value": "TempAgua_C"},
@@ -8,5 +8,6 @@
   "cor": null,
   "flow": {"table": "Vazao1s", "mode": "Flow_mode", "ma": "Flow_mA", "status": "Flow_Status",
            "pulses": "Flow_Pulsos", "pulses_total": "Flow_PulsosTot", "pulse_status": "Flow_PStatus",
-           "optional": ["mode", "pulses", "pulses_total", "pulse_status"]}
+           "t_first": "Flow_T1_ms", "t_last": "Flow_T2_ms", "timing_res": "Flow_ScanF_ms",
+           "optional": ["mode", "pulses", "pulses_total", "pulse_status", "t_first", "t_last", "timing_res"]}
 }

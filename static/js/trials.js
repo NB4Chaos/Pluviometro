@@ -15,15 +15,30 @@ const Trials = {
     const m = Math.floor(ms / 60000), s = (ms - m * 60000) / 1000, whole = Number.isInteger(s);
     return `${m}:${whole ? String(s).padStart(2, '0') : (s < 10 ? '0' : '') + Fmt.any(s)}`;
   },
+  // casas decimais do tempo (s) para uma resolução em ms: 1000 → 0 · 100 → 1 · 10 → 2 · 1 → 3. Nunca mais casas que a resolução EFETIVA.
+  durDec: resMs => resMs >= 1000 ? 0 : resMs >= 100 ? 1 : resMs >= 10 ? 2 : 3,
+  durRes(ms, resMs) {
+    if (ms == null || isNaN(ms)) return '—';
+    const d = this.durDec(resMs || 1000), s = ms / 1000;
+    if (s < 60) return `${s.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d })} s`;
+    const m = Math.floor(s / 60), r = s - m * 60;
+    return `${m}:${(r < 10 ? '0' : '') + r.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d })}`;
+  },
   dec: res => { if (!res) return 3; const t = String(res), i = t.indexOf('.'); return Math.min(3, Math.max(1, i < 0 ? 0 : t.length - i - 1)); },
   kv(l, v, u = '', tag = '') { return `<div class="rk"><span>${l}${tag ? ` <em class="t-${tag[0]}">${tag[1]}</em>` : ''}</span><b>${v}${u && v !== '—' ? ` <i>${u}</i>` : ''}</b></div>`; },
   fl(v, cfg) { return v == null ? null : Flow.convert(v, 'L/min', cfg.flow_unit, cfg.density_g_cm3); },
   cfgMs: t => t.duration_cfg_ms != null ? t.duration_cfg_ms : t.duration_cfg_s * 1000,
   // ensaio em andamento: tempo decorrido/restante (relógio do servidor) e tempo efetivo coberto por registros do datalogger
   timeRows(t, part) {
-    const tm = part && part.timing, cfg = this.cfgMs(t);
+    const tm = part && part.timing, cfg = this.cfgMs(t), f = part && part.flow, res = tm ? tm.display_res_ms : 1000;
+    const eff = f && f.time_eff_ms != null ? f.time_eff_ms : tm && tm.eff_ms;
     return this.kv('Tempo decorrido', this.dur(t.elapsed_s * 1000)) + this.kv('Tempo restante', `${this.dur(t.remaining_s * 1000)} de ${this.dur(cfg)}`)
-      + (tm ? this.kv('Tempo efetivo (registros)', tm.eff_ms == null ? '—' : this.dur(tm.eff_ms), '', ['p', 'parcial']) : '');
+      + (tm ? this.kv(`Tempo efetivo (${tm.res_source === 'timer' ? 'Timer do datalogger' : 'registros'})`, eff == null ? '—' : this.durRes(eff, res), '', ['p', 'parcial']) : '');
+  },
+  standardHtml(s) {
+    if (!s) return '';
+    const K = this.kv.bind(this), id = [s.brand, s.model].filter(Boolean).map(esc).join(' | ');
+    return `<p class="lbl sec">Padrão</p><div class="rg">${K('TAG', `<b>${esc(s.tag)}</b>`)}${id ? K('Marca | modelo', id) : ''}${s.sn ? K('Número de série', esc(s.sn)) : ''}${K('Aquisição', s.acq === 'pulse' ? 'Pulsos' : 'Corrente 4–20 mA')}</div>`;
   },
   bar(sel, x) {
     const el = $(sel); if (!el) return;
@@ -34,14 +49,17 @@ const Trials = {
   kText: c => c.k_pulses_per_l == null ? 'não configurado' : `${Fmt.sig(c.k_pulses_per_l, 6)} pulsos/L`,
 
   // temporização do ensaio: carimbos do datalogger, configurado × efetivo, resolução (= Scan)
-  timingHtml(res) {
+  // Temporização enxuta: o que o laboratório precisa levar para a planilha. kind 'flow' mostra o tempo dos pulsos (Timer) quando existe.
+  timingHtml(res, kind) {
     const t = res && res.timing; if (!t) return '';
-    const K = this.kv.bind(this), d = this.dur.bind(this), stamp = t.resolution_ms < 1000 ? Fmt.dtms : Fmt.dt;   // ms só quando o Scan resolve ms
-    const h = K('Início (datalogger)', stamp(t.start_ts)) + K('Fim previsto', stamp(t.end_ts)) + K('Duração configurada', d(t.cfg_ms))
-      + K('Tempo efetivo (1º → último registro + Scan)', t.eff_ms == null ? '—' : d(t.eff_ms)) + K('Diferença efetivo − configurado', t.diff_ms == null ? '—' : `${t.diff_ms > 0 ? '+' : ''}${t.diff_ms} ms`, '', t.diff_ms ? ['p', 'lacuna'] : '')
-      + K('Resolução (Scan do datalogger)', `${t.resolution_ms} ms`) + K('Registros no ensaio', t.samples)
-      + K('Primeiro registro', stamp(t.first_sample_ts)) + K('Último registro', stamp(t.last_sample_ts)) + (t.wall_ms != null ? K('Tempo de parede (servidor, informativo)', d(t.wall_ms)) : '');
-    return `<p class="lbl sec">Temporização</p><div class="rg">${h}</div>`;
+    const K = this.kv.bind(this), R = t.display_res_ms || t.resolution_ms || 1000, stamp = t.resolution_ms < 1000 ? Fmt.dtms : Fmt.dt, dr = ms => this.durRes(ms, R);
+    // a janela começa 1 ms depois do último registro anterior ao ensaio: a borda real do datalogger é esse registro (sem o ",001" artificial)
+    let h = K('Início (datalogger)', stamp(t.start_ts - 1)) + K('Fim', stamp(t.end_ts - 1)) + K('Duração configurada', this.dur(t.cfg_ms));
+    if (kind === 'flow' && t.pulse_eff_ms != null) h += K('Tempo efetivo dos pulsos (1º → último, Timer)', dr(t.pulse_eff_ms), '', ['f', 'medido']) + K('Início dos pulsos', Fmt.dtms(t.first_pulse_ts)) + K('Fim dos pulsos', Fmt.dtms(t.last_pulse_ts));
+    else h += K('Tempo efetivo (registros do datalogger)', t.eff_ms == null ? '—' : dr(t.eff_ms), '', ['f', 'medido']);
+    h += K('Resolução efetiva', `${this.dur(t.resolution_ms)}${t.res_source === 'timer' ? ' (Timer, Scan rápido)' : ' (Scan do programa)'}`, '', t.requested_res_ms && t.requested_res_ms < t.resolution_ms ? ['p', `pedida ${this.dur(t.requested_res_ms)}`] : '')
+      + K('Registros', t.samples);
+    return `<p class="lbl sec">Tempo</p><div class="rg">${h}</div>`;
   },
   cfgText(c) {
     const p = [];   // chaves do snapshot congelado pelo servidor (trials.start)
@@ -50,45 +68,37 @@ const Trials = {
     if (c.density != null) p.push(`ρ = ${Fmt.num(c.density, 4)} g/cm³`);
     if (c.area_cm2 != null) p.push(`A = ${Fmt.num(c.area_cm2, 1)} cm²`);
     if (c.res_mm != null) p.push(`resolução = ${Fmt.any(c.res_mm)} mm/basculada`);
+    if (c.standard) p.push(`padrão = ${c.standard.tag}`);
     if (c.flow_method) p.push(`método = ${c.flow_method === 'pulse' ? 'pulsos' : 'analógico'}`);
-    if ('k_pulses_per_l' in c) p.push(`K = ${this.kText(c)}${c.k_unc_pct != null ? ` (u = ${Fmt.any(c.k_unc_pct)} %)` : ''}`);
+    if (c.k_input != null) p.push(`K = ${Fmt.sig(c.k_input, 6)} ${c.k_unit || 'pulsos/L'}`); else if ('k_pulses_per_l' in c) p.push(`K = ${this.kText(c)}`);
+    if (c.time_res_ms) p.push(`resolução de tempo pedida = ${this.dur(c.time_res_ms)}`);
     if (c.q4 != null && c.q20 != null) p.push(`4–20 mA = ${Fmt.sig(c.q4)}–${Fmt.sig(c.q20)} ${c.range_unit || ''}`);
     if (c.ma_tol != null) p.push(`tolerância = ${Fmt.num(c.ma_tol, 3)} mA`);
     return p.length ? p.join(' · ') : JSON.stringify(c);
   },
 
+  // Detalhes do medidor no método Comparativo: só o que o padrão adquiriu e o que foi calculado dele. Nada da balança aqui.
   flowHtml(res, cfg, part) {
     const f = res.flow, K = this.kv.bind(this), n = Fmt.num, dm = cfg.flow_decimals, p = part ? ['p', 'parcial'] : '', C = ['c', 'calculado'];
     if (!f) return '<p class="note">O programa do datalogger não fornece o medidor de vazão.</p>';
-    const q = f.flow_l_min, fu = cfg.flow_unit, c = v => this.fl(v, cfg);
-    const ML = { pulse: 'Pulsos', analog: 'Analógico 4–20 mA', misto: 'Misto (método mudou)' };
-    let h = K('Método', ML[f.mode] || f.mode);
+    const q = f.flow_l_min, fu = cfg.flow_unit, c = v => this.fl(v, cfg), R = res.timing ? res.timing.display_res_ms : 1000, mass = f.k_basis === 'mass';
+    let h = this.standardHtml(f.standard) + '<p class="lbl sec">Medidor</p><div class="rg">';
+    h += K('Aquisição', { pulse: 'Pulsos', analog: 'Corrente 4–20 mA', misto: 'Mista (o método mudou)' }[f.mode] || f.mode);
     if (f.mode === 'pulse') {   // o que foi adquirido vem antes do que foi calculado
-      h += K('Pulsos brutos (N)', f.pulses_total == null ? '—' : f.pulses_total.toLocaleString('pt-BR'), '', p)
-        + K('Tempo efetivo (Δt)', f.time_eff_ms == null ? '—' : this.dur(f.time_eff_ms), '', p) + K('Frequência média', n(f.freq_mean_hz, 1), 'Hz', p);
-      if (f.count_method) h += K('Contagem', f.count_method === 'acumulado' ? 'diferença do contador acumulado' : 'soma dos registros', '', f.pulses_sum != null && f.pulses_sum !== f.pulses_total ? ['p', `Σ ${f.pulses_sum.toLocaleString('pt-BR')}`] : '');
-      if (f.resolution_pct != null) h += K('Resolução (1 pulso)', Fmt.sig(f.resolution_pct, 2), '%');
-      h += K('Fator K usado', f.k_pulses_per_l ? Fmt.sig(f.k_pulses_per_l, 6) : 'não configurado', f.k_pulses_per_l ? 'pulsos/L' : '');
+      h += K('Pulsos acumulados (N)', f.pulses_total == null ? '—' : f.pulses_total.toLocaleString('pt-BR'), '', p)
+        + K('Tempo efetivo (Δt)', f.time_eff_ms == null ? '—' : this.durRes(f.time_eff_ms, R), '', p) + K('Frequência média (N ÷ Δt)', n(f.freq_mean_hz, 2), 'Hz', p || C)
+        + K('Fator K', f.k_input != null ? Fmt.sig(f.k_input, 6) : f.k_pulses_per_l ? Fmt.sig(f.k_pulses_per_l, 6) : 'não configurado', f.k_input != null ? f.k_unit : f.k_pulses_per_l ? 'pulsos/L' : '', ['f', 'configurado']);
+      if (mass) h += K('Massa calculada (N ÷ K)', n(f.mass_kg, 4), 'kg', p || C) + K('Vazão mássica (massa ÷ Δt)', n(f.mass_flow_kg_min, 4), 'kg/min', p || C);
+      if (f.count_method === 'soma') h += K('Contagem', 'soma dos registros (contador do datalogger reiniciou)');
+    } else {
+      if (f.ma) h += K('Corrente média', n(f.ma.mean, 3), 'mA', p) + K('Corrente mín / máx', `${n(f.ma.min, 3)} / ${n(f.ma.max, 3)}`, 'mA');
+      if (f.n_clamped) h += K('Leituras no limite (4 ou 20 mA)', f.n_clamped);
     }
-    h += K('Vazão média' + (f.mode === 'pulse' ? ' (N ÷ K ÷ Δt)' : ''), n(c(q && q.mean), dm), fu, p || C) + K('Vazão máxima', n(c(q && q.max), dm), fu, p || C) + K('Vazão mínima', n(c(q && q.min), dm), fu, p || C)
-      + K('Volume no ensaio' + (f.mode === 'pulse' ? ' (N ÷ K)' : ''), n(f.volume_l, 3), 'L', p || C);
-    const u = f.uncertainty;   // só componentes demonstráveis (±1 pulso, relógio do datalogger, K se informado), combinadas em quadratura
-    if (u) {
-      h += K('Incerteza da contagem (±1 pulso, retangular)', Fmt.sig(u.pulses_rel_pct, 2), '%') + K('Incerteza do relógio do datalogger (±3 min/ano)', Fmt.sig(u.clock_rel_pct, 2), '%')
-        + K('Incerteza do fator K', u.k_included ? Fmt.sig(u.k_rel_pct, 2) : 'não informada (não entrou)', u.k_included ? '%' : '')
-        + K('Incerteza-padrão combinada da vazão', Fmt.sig(u.flow_rel_pct, 2), '%', C);
-      if (u.flow_u_l_min != null) h += K('Vazão média ± u', `${n(c(q && q.mean), dm)} ± ${Fmt.sig(c(u.flow_u_l_min), 2)}`, fu, C) + K('Volume ± u', `${n(f.volume_l, 3)} ± ${Fmt.sig(u.volume_u_l, 2)}`, 'L', C);
-    }
-    if (f.ma) h += K('Corrente média', n(f.ma.mean, 3), 'mA', p);
-    if (f.n_clamped) h += K('Leituras no limite (4 ou 20 mA)', f.n_clamped);
-    h += K('Leituras válidas', f.n_rows ? `${f.n_valid}/${f.n_rows} (${n(100 * f.valid_fraction, 0)} %)` : '—');
-    const v = f.vs_reference;
-    if (v) h += K('Volume pela balança (mesmo intervalo)', n(v.volume_ref_l, 3), 'L', ['r', 'ref.']) + K('Volume do medidor (mesmo intervalo)', n(v.volume_meter_l, 3), 'L')
-      + K('Diferença do medidor', n(v.diff_l, 3), 'L') + K('Erro do medidor', v.error_pct == null ? '—' : n(v.error_pct, 2), '%');
-    else h += K('Referência pela balança', '—') ;
-    const o = f.other;
-    if (o) h += K(`Outro canal (${o.method === 'pulse' ? 'pulsos' : 'analógico'}), mesmo intervalo`, n(o.volume_l, 3), 'L') + K('Diferença entre canais', o.diff_pct == null ? '—' : n(o.diff_pct, 2), '%');
-    return `<div class="rg">${h}</div>` + (f.issues || []).map(i => `<p class="note err">${esc(i)}</p>`).join('');
+    const vt = mass ? ['c', 'convertido (ρ)'] : (p || C);
+    h += K(f.mode === 'pulse' ? (mass ? 'Volume (massa ÷ ρ)' : 'Volume (N ÷ K)') : 'Volume (∫ vazão)', n(f.volume_l, 3), 'L', vt)
+      + K('Vazão média', n(c(q && q.mean), dm), fu, vt) + K('Vazão mín / máx', q ? `${n(c(q.min), dm)} / ${n(c(q.max), dm)}` : '—', fu, vt)
+      + K('Leituras válidas', f.n_rows ? `${f.n_valid}/${f.n_rows} (${n(100 * f.valid_fraction, 0)} %)` : '—');
+    return h + '</div>' + (f.issues || []).map(i => `<p class="note err">${esc(i)}</p>`).join('');
   },
 
   // Blocos separados por instrumento. `which`: 'bal' (balança + comparação), 'pluv' (pluviômetro) ou 'all' (histórico/relatório).
@@ -119,8 +129,10 @@ const Trials = {
   detail(t, cfg) {
     if (!t.result) return `<div class="detail"><div class="hd"><h3>Ensaio ${t.id} · ${this.KIND[t.kind]}</h3><button class="btn" id="tr-close">Fechar</button></div>${this.summary(t)}<p class="note">Sem resultado (ensaio interrompido antes da primeira amostra).</p></div>`;
     const d = { ...cfg, density_g_cm3: t.cfg.density }, q = t.result.quality;
-    const html = (t.kind === 'flow' ? `<p class="lbl sec">Medidor de vazão</p>${this.flowHtml(t.result, d, false)}<hr>` : '') + this.pluvHtml(t.result, d, false) + this.timingHtml(t.result);
-    return `<div class="detail"><div class="hd"><h3>Ensaio ${t.id} · ${this.KIND[t.kind]}</h3><button class="btn" id="tr-close">Fechar</button></div>${this.summary(t)}
+    // contextual: comparativo = padrão + medidor + tempo (sem balança); gravimétrico = balança + pluviômetro + tempo
+    const html = (t.kind === 'flow' ? this.flowHtml(t.result, d, false) : this.pluvHtml(t.result, d, false)) + this.timingHtml(t.result, t.kind);
+    const std = t.kind === 'flow' && t.cfg.standard ? ` · ${esc(t.cfg.standard.tag)}` : '';
+    return `<div class="detail"><div class="hd"><h3>Ensaio ${t.id} · ${this.KIND[t.kind]}${std}</h3><button class="btn" id="tr-close">Fechar</button></div>${this.summary(t)}
       <p class="note">Configuração congelada no início: ${esc(this.cfgText(t.cfg))}.</p>${q.reasons.length ? `<p class="note err">${q.reasons.join('; ')}</p>` : ''}${html}</div>`;
   },
 };

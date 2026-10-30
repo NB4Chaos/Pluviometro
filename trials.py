@@ -25,8 +25,9 @@ MAX_DURATION_MS = 6 * 3600 * 1000   # a duração mínima é a resolução efeti
 GRACE_S = 120          # espera (relógio do PC) depois do fim previsto antes de dar o ensaio por interrompido
 VALID_FRAC = 0.95      # fração mínima de leituras válidas do sinal exigido para o ensaio ser "concluído"
 KINDS = {"flow": "Medidor de Vazão", "pluv": "Pluviômetro (gravimétrico)"}
-SCOLS = "ts,mass_g,temp_c,mass_status,temp_status,cor_ma,cor_status,flow_mode,flow_pulses,flow_hz,pulses_total,ma_code,pulse_code,flow_dt_ms"
-NEW_COLS = (("pulses_total", "INTEGER"), ("ma_code", "INTEGER"), ("pulse_code", "INTEGER"), ("flow_dt_ms", "INTEGER"))
+SCOLS = "ts,mass_g,temp_c,mass_status,temp_status,cor_ma,cor_status,flow_mode,flow_pulses,flow_hz,pulses_total,ma_code,pulse_code,flow_dt_ms,flow_t1_ms,flow_t2_ms,flow_tres_ms"
+NEW_COLS = (("pulses_total", "INTEGER"), ("ma_code", "INTEGER"), ("pulse_code", "INTEGER"), ("flow_dt_ms", "INTEGER"),
+            ("flow_t1_ms", "INTEGER"), ("flow_t2_ms", "INTEGER"), ("flow_tres_ms", "INTEGER"))
 MIN_PULSES = 200       # abaixo disso 1 pulso pesa mais que 0,5 % do volume: o resultado avisa (resolução da contagem)
 
 SCHEMA = """
@@ -87,20 +88,46 @@ def _other_channel(mode, rows, ts, w, pls, tot, pok, cfg, a, b, vm):
     return {"method": method, "volume_l": vo, "diff_pct": 100.0 * (vm - vo) / vo if vo else None}
 
 
-def timing(ts, cfg, start, end, scan_ms=1000):
-    """Temporização do ensaio, só com carimbos do DATALOGGER (ms; resolução efetiva = intervalo do Scan). Três tempos, sem misturar:
+def timing(ts, cfg, start, end, scan_ms=1000, fine=None):
+    """Temporização do ensaio, só com carimbos do DATALOGGER (ms). Três tempos, sem misturar:
       cfg_ms    = duração configurada pelo operador (preservada como digitada, em ms)
       window_ms = janela [start, end) usada no cálculo (= cfg_ms quando o ensaio chega ao fim previsto)
       eff_ms    = tempo efetivamente coberto pelos registros: do 1º ao último carimbo, mais um Scan (o registro em t cobre (t−Scan, t])
     diff_ms = eff − cfg. Sem registros: eff/diff = None (nunca zero). `wall_ms` (relógio do PC) entra em _finish, só como informação.
+    Resoluções, sem confundir: `resolution_ms` = EFETIVA dos carimbos (Scan rápido do Timer na v5, senão o Scan do programa);
+    `requested_res_ms` = escolhida pelo operador; `display_res_ms` = max das duas (a tela nunca mostra casas que o hardware não resolve).
+    `fine` = (t_primeiro_pulso_ms, t_ultimo_pulso_ms, res_ms) quando o programa fornece os carimbos do Timer.
     Isto NÃO calibra o temporizador: é o registro necessário para comparar com uma referência externa de tempo."""
     cfg_ms = cfg.get("duration_ms")
     if cfg_ms is None and cfg.get("duration_s") is not None:
         cfg_ms = int(round(float(cfg["duration_s"]) * 1000))
     eff = (ts[-1] - ts[0] + scan_ms) if ts else None
-    return {"start_ts": start, "end_ts": end, "cfg_ms": cfg_ms, "window_ms": end - start, "resolution_ms": scan_ms,
-            "first_sample_ts": ts[0] if ts else None, "last_sample_ts": ts[-1] if ts else None, "samples": len(ts),
-            "eff_ms": eff, "diff_ms": (eff - cfg_ms) if eff is not None and cfg_ms is not None else None, "wall_ms": None}
+    res = int(fine[2]) if fine and fine[2] else scan_ms
+    req = int(cfg.get("time_res_ms") or 100)
+    out = {"start_ts": start, "end_ts": end, "cfg_ms": cfg_ms, "window_ms": end - start, "resolution_ms": res, "record_ms": scan_ms,
+           "requested_res_ms": req, "display_res_ms": max(req, res), "res_source": "timer" if fine and fine[2] else "scan",
+           "first_sample_ts": ts[0] if ts else None, "last_sample_ts": ts[-1] if ts else None, "samples": len(ts),
+           "eff_ms": eff, "diff_ms": (eff - cfg_ms) if eff is not None and cfg_ms is not None else None, "wall_ms": None,
+           "first_pulse_ts": None, "last_pulse_ts": None, "pulse_eff_ms": None}
+    if fine and fine[0] is not None and fine[1] is not None:
+        out.update(first_pulse_ts=fine[0], last_pulse_ts=fine[1], pulse_eff_ms=fine[1] - fine[0])
+    return out
+
+
+def fine_pulse_span(rows, pok, scan_ms):
+    """v5: instantes (ms, horário do datalogger) do início do 1º e do fim do último sub-Scan com pulsos, e a resolução do Scan rápido.
+    O registro em t cobre (t−record, t]; Flow_T1_ms/Flow_T2_ms são ms dentro desse segundo (Timer reiniciado na borda), referidos
+    ao FIM do sub-Scan que contou os pulsos; o sub-Scan cobre (T−res, T]. Devolve (t_ini, t_fim, res) ou None se o programa não tem os campos."""
+    res = next((r[16] for r in rows if len(r) > 16 and r[16]), None)
+    if not res:
+        return None
+    first = next(((r[0], r[14]) for r, ok in zip(rows, pok) if ok and len(r) > 14 and r[14] is not None and (r[8] or 0) > 0), None)
+    last = next(((r[0], r[15]) for r, ok in reversed(list(zip(rows, pok))) if ok and len(r) > 15 and r[15] is not None and (r[8] or 0) > 0), None)
+    if not first or not last:
+        return (None, None, res)
+    t_ini = first[0] - scan_ms + first[1] - res
+    t_fim = last[0] - scan_ms + last[1]
+    return (t_ini, t_fim, res)
 
 
 def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
@@ -115,7 +142,9 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
     q = {"window_s": (end - start) / 1000, "covered_s": cov / 1000, "gaps": gaps, "rows": len(rows),
          "coverage_complete": complete, "reasons": []}
     res = cfg.get("res_mm")
-    out = {"quality": q, "flow": None, "gravimetric": None, "pluviometer": None, "temperature": None, "timing": timing(ts, cfg, start, end, scan_ms)}
+    pok0 = [r[8] is not None and (len(r) <= 12 or r[12] in (None, 0)) for r in rows]
+    fine = fine_pulse_span(rows, pok0, scan_ms)
+    out = {"quality": q, "flow": None, "gravimetric": None, "pluviometer": None, "temperature": None, "timing": timing(ts, cfg, start, end, scan_ms, fine)}
 
     # ---- temperatura (informativa: densidade e área NÃO são deduzidas dela)
     tv = [r[2] for r in rows if r[2] is not None]
@@ -139,8 +168,10 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
         f = {"mode": mode, "method_cfg": cfg.get("flow_method"), "n_rows": len(rows), "n_valid": len(valid),
              "valid_fraction": len(valid) / len(rows) if rows else None, "flow_l_min": None, "volume_l": None,
              "pulses_total": None, "count_method": None, "pulses_sum": None, "resolution_pct": None, "freq_mean_hz": None, "time_eff_ms": None,
-             "uncertainty": None, "ma": None, "n_clamped": None, "valid_s": None, "vs_reference": None, "other": None,
-             "k_pulses_per_l": k, "k_unit": cfg.get("k_unit"), "ma_tol": tol, "issues": []}
+             "time_source": None, "mass_kg": None, "mass_flow_kg_min": None,
+             "ma": None, "n_clamped": None, "valid_s": None, "vs_reference": None, "other": None,
+             "k_pulses_per_l": k, "k_unit": cfg.get("k_unit"), "k_input": cfg.get("k_input"), "k_basis": "mass" if calc.k_is_mass(cfg.get("k_unit")) else "volume",
+             "ma_tol": tol, "standard": cfg.get("standard"), "issues": []}
         # ---- contagem BRUTA de pulsos: calculada SEMPRE que há registros válidos do canal, com ou sem fator K (31/10)
         n = n_cum = None
         pulse_span = None
@@ -154,13 +185,17 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
                      resolution_pct=100.0 / n if n else None)
             if n_cum is not None and n_cum != n_sum:
                 f["issues"].append(f"{n_cum - n_sum} pulso(s) de registros ausentes ou inválidos contados pelo acumulado do datalogger")
-            if n_cum is not None:   # o acumulado cobre o trecho inteiro, inclusive registros ausentes
-                pulse_span = (ts[-1] - ts[0]) / 1000 + calc.pulse_window_s(rows[0][13] if len(rows[0]) > 13 else None)[0]
+            if fine and fine[0] is not None and n_cum is not None:   # v5: do 1º ao último sub-Scan com pulsos (Timer do datalogger)
+                pulse_span, f["time_source"] = (fine[1] - fine[0]) / 1000, "timer"
+            elif n_cum is not None:   # o acumulado cobre o trecho inteiro, inclusive registros ausentes
+                pulse_span, f["time_source"] = (ts[-1] - ts[0]) / 1000 + calc.pulse_window_s(rows[0][13] if len(rows[0]) > 13 else None)[0], "scan"
             else:
-                pulse_span = sum(w[i] for i, ok in enumerate(pok) if ok) / 1000
+                pulse_span, f["time_source"] = sum(w[i] for i, ok in enumerate(pok) if ok) / 1000, "scan"
             f["freq_mean_hz"] = n / pulse_span if pulse_span else None
             f["time_eff_ms"] = int(round(pulse_span * 1000)) if pulse_span else None
-            f["uncertainty"] = calc.pulse_uncertainty(n, k, pulse_span, cfg.get("k_unc_pct"))   # ±1 pulso, relógio e K (se informado)
+            if f["k_basis"] == "mass" and cfg.get("k_input"):   # pulsos/kg: N ÷ K é MASSA; volume só pela densidade (k_pulses_per_l)
+                f["mass_kg"] = n / float(cfg["k_input"])
+                f["mass_flow_kg_min"] = f["mass_kg"] / (pulse_span / 60.0) if pulse_span else None
             if n < MIN_PULSES:
                 f["issues"].append(f"só {n} pulsos no ensaio: 1 pulso = {100.0 / n if n else 100:.2g} % do volume (resolução da contagem)")
         if valid:
@@ -181,7 +216,8 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
             if mode == "analog":
                 f["n_clamped"] = sum(1 for i in valid if calc.classify_ma(rows[i][5], tol)[0] in ("low", "high"))
         elif mode == "pulse" and not k:
-            f["issues"].append("fator K não configurado: vazão e volume indisponíveis (as contagens brutas são preservadas)")
+            f["issues"].append("fator K em pulsos/kg sem densidade: vazão volumétrica indisponível (massa e contagens preservadas)" if f["mass_kg"] is not None
+                               else "fator K não configurado: vazão e volume indisponíveis (as contagens brutas são preservadas)")
         elif mode in ("analog", "misto") and (cfg.get("q4") is None or cfg.get("q20") is None):
             f["issues"].append("faixa 4–20 mA não configurada: vazão indisponível (o sinal em mA é preservado)")
         out["flow"] = f
@@ -244,8 +280,9 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
 
 
 class Trials:
-    def __init__(self, db, lock, get_cfg, latest_ts, scan_ms=1000):
+    def __init__(self, db, lock, get_cfg, latest_ts, scan_ms=1000, get_standard=None):
         self.db, self.lock, self.get_cfg, self.latest_ts, self.scan_ms = db, lock, get_cfg, latest_ts, int(scan_ms or 1000)
+        self.get_standard = get_standard or (lambda sid: None)
         with lock:
             db.executescript(SCHEMA)
             have = {r[1] for r in db.execute("PRAGMA table_info(trial_samples)")}
@@ -285,6 +322,8 @@ class Trials:
         out = []
         for r in rows:
             d = self._row(r)
+            std = (d["cfg"] or {}).get("standard") or {}
+            d["standard_tag"], d["standard_acq"] = std.get("tag"), std.get("acq")   # TAG congelada no ensaio (não a atual do cadastro)
             d.pop("result"), d.pop("cfg")
             out.append(d)
         return out
@@ -344,8 +383,9 @@ class Trials:
         snap = {"res_mm": cfg["tip_resolution_mm"], "area_cm2": cfg["catch_area_cm2"], "density": cfg["density_g_cm3"],
                 "k_pulses_per_l": cfg["flow_k_pulses_per_l"], "q4": cfg["cor"]["q4"], "q20": cfg["cor"]["q20"],
                 "range_unit": cfg["cor"]["unit"], "duration_s": dur, "duration_ms": dur_ms, "scan_ms": self.scan_ms,
-                "flow_method": cfg.get("flow_method", "analog"), "k_unit": cfg.get("flow_k_unit", "pulsos/L"),
-                "ma_tol": cfg.get("flow_ma_tol", calc.MA_TOL), "k_unc_pct": cfg.get("flow_k_uncertainty_pct")}
+                "flow_method": cfg.get("flow_method", "analog"), "k_unit": cfg.get("flow_k_unit", "pulsos/L"), "k_input": cfg.get("flow_k_input"),
+                "ma_tol": cfg.get("flow_ma_tol", calc.MA_TOL), "time_res_ms": cfg.get("time_resolution_ms", 100),
+                "standard": self.get_standard(cfg.get("standard_id")) if cfg.get("standard_id") else None}   # CÓPIA: editar/excluir o padrão não muda este ensaio
         tid = f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
         start = lt + 1     # primeira amostra do ensaio = a PRÓXIMA; a leitura que já estava na tela não entra
         try:

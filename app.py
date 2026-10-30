@@ -31,8 +31,10 @@ DEFAULTS = {"mass_unit": "g", "temp_unit": "C", "flow_unit": "L/min", "mass_deci
             "default_range_s": 900,
             "catch_area_cm2": None,        # área da ABERTURA do coletor (cm²). Não é a da báscula.
             "flow_k_pulses_per_l": None,   # fator K do medidor por pulsos, sempre em pulsos/L (fonte única). Nunca presumido.
-            "flow_k_unit": "pulsos/L",     # só a unidade em que o operador digita e vê o K (calc.K_UNITS)
-            "flow_k_uncertainty_pct": None,   # incerteza relativa do K (certificado do medidor), opcional; None = não informada
+            "flow_k_unit": "pulsos/L",     # unidade em que o operador digita e vê o K (calc.K_UNITS; pulsos/kg = grandeza mássica)
+            "flow_k_input": None,          # K como digitado, na unidade acima (fonte para recalcular pulsos/L quando a densidade muda)
+            "time_resolution_ms": 100,     # resolução do tempo escolhida (100 | 10 | 1 ms); a EFETIVA é a do programa do datalogger
+            "standard_id": None,           # padrão de vazão selecionado (tabela standards); seus parâmetros são copiados para as chaves acima
             "flow_method": "analog",       # método do cálculo da vazão: analog | pulse (o datalogger mede os dois canais)
             "flow_ma_tol": calc.MA_TOL,    # mA: tolerância nos limites 4 e 20 mA (dentro dela a escala fica presa no limite)
             "trial_duration_ms": 60000,    # duração dos ensaios; fixada no início de cada ensaio; mínimo = Scan do datalogger
@@ -41,7 +43,8 @@ DEFAULTS = {"mass_unit": "g", "temp_unit": "C", "flow_unit": "L/min", "mass_deci
             "cor": {"q4": None, "q20": None, "unit": "L/min"},  # faixa 4–20 mA: definida pelo operador, nunca fixa no código
             "comm": {"protocol": "http", "address": "", "user": "", "profile": "programa_atual"}}
 COLS = ["ts", "mass_g", "temp_c", "mass_status", "temp_status", "tips_total", "cor_ma", "cor_status",
-        "flow_mode", "flow_pulses", "flow_hz", "pulses_total", "ma_code", "pulse_code", "flow_dt_ms"]
+        "flow_mode", "flow_pulses", "flow_hz", "pulses_total", "ma_code", "pulse_code", "flow_dt_ms", "flow_t1_ms", "flow_t2_ms", "flow_tres_ms"]
+TIME_RES_MS = (100, 10, 1)            # resolução do tempo escolhida pelo operador (0,1 s | 0,01 s | 0,001 s); a efetiva é a do datalogger
 INSERT_SQL = f"INSERT OR IGNORE INTO samples({','.join(COLS)}) VALUES({','.join('?' * len(COLS))})"
 UPDATE_SQL = f"UPDATE samples SET {','.join(c + '=?' for c in COLS[1:])} WHERE ts=?"
 LAB = {"no_comm": "Sem comunicação", "invalid": "Leitura inválida", "out_of_range": "Fora da faixa",
@@ -108,10 +111,19 @@ def _read_cfg():
     if k is not None and (isinstance(k, bool) or not isinstance(k, (int, float)) or not math.isfinite(k) or k <= 0):
         log.warning("Fator K inválido no config.json (%r): ignorado; a vazão por pulsos fica 'não configurada'", k)
         cfg["flow_k_pulses_per_l"] = None
-    ku = cfg.get("flow_k_uncertainty_pct")   # incerteza relativa do K (certificado do medidor), opcional: None = não entra na combinação
-    if ku is not None and (isinstance(ku, bool) or not isinstance(ku, (int, float)) or not math.isfinite(ku) or not 0 <= ku <= 100):
-        cfg["flow_k_uncertainty_pct"] = None
+    cfg.pop("flow_k_uncertainty_pct", None)   # chave de uma versão intermediária (31/10): o sistema não calcula incerteza
+    if cfg.get("time_resolution_ms") not in TIME_RES_MS:
+        cfg["time_resolution_ms"] = 100
+    if cfg.get("flow_k_input") is None and cfg.get("flow_k_pulses_per_l"):   # configuração anterior: só pulsos/L gravado
+        cfg["flow_k_input"] = calc.k_from_pulses_per_l(cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"], cfg.get("density_g_cm3"))
+    _recompute_k(cfg)
     return cfg, user.get("comm", {})
+
+
+def _recompute_k(cfg):
+    """K interno (pulsos/L) a partir do que foi digitado e da unidade; pulsos/kg usa a densidade configurada (sem ela fica None)."""
+    if cfg.get("flow_k_input") is not None:
+        cfg["flow_k_pulses_per_l"] = calc.k_to_pulses_per_l(cfg["flow_k_input"], cfg["flow_k_unit"], cfg.get("density_g_cm3"))
 
 
 _cfg, _user_comm = _read_cfg()
@@ -178,9 +190,14 @@ CREATE INDEX IF NOT EXISTS ix_tips ON tips(ts);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);""")
 _have = {r[1] for r in db.execute("PRAGMA table_info(samples)")}
 for _col, _typ in (("cor_ma", "REAL"), ("cor_status", "TEXT"), ("flow_mode", "TEXT"), ("flow_pulses", "REAL"), ("flow_hz", "REAL"),
-                   ("pulses_total", "INTEGER"), ("ma_code", "INTEGER"), ("pulse_code", "INTEGER"), ("flow_dt_ms", "INTEGER")):
+                   ("pulses_total", "INTEGER"), ("ma_code", "INTEGER"), ("pulse_code", "INTEGER"), ("flow_dt_ms", "INTEGER"),
+                   ("flow_t1_ms", "INTEGER"), ("flow_t2_ms", "INTEGER"), ("flow_tres_ms", "INTEGER")):
     if _col not in _have:  # bancos antigos ganham as colunas novas sem perder dados
         db.execute(f"ALTER TABLE samples ADD COLUMN {_col} {_typ}")
+# padrões de vazão do laboratório (cadastro único; o ensaio congela uma CÓPIA dos parâmetros usados, então editar/excluir aqui não altera o histórico)
+db.execute("""CREATE TABLE IF NOT EXISTS standards(id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  brand TEXT, model TEXT, sn TEXT, manufacturer TEXT, description TEXT, notes TEXT, acq TEXT NOT NULL,
+  k_value REAL, k_unit TEXT, pulse_cfg TEXT, q4 REAL, q20 REAL, range_unit TEXT, signal_type TEXT, created_ts INTEGER, updated_ts INTEGER)""")
 if "src" not in {r[1] for r in db.execute("PRAGMA table_info(tips)")}:  # banco antigo: ganha a chave única do evento
     db.execute("ALTER TABLE tips ADD COLUMN src TEXT")
 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_tips_src ON tips(src)")  # evento vindo do datalogger nunca entra duas vezes
@@ -224,14 +241,16 @@ def latest_sample_ts():
 
 state = {"latest": None, "last_rx": None, "trial_id": None}
 SCAN_MS = int(dl.profile.get("scan_ms") or 1000)   # intervalo do Scan do programa CRBasic: resolução temporal efetiva dos registros
-trials = Trials(db, lock, load_cfg, latest_sample_ts, scan_ms=SCAN_MS)
+trials = Trials(db, lock, load_cfg, latest_sample_ts, scan_ms=SCAN_MS, get_standard=lambda sid: std_get(sid))
 
 
 # ---------- Medidor de Vazão: os dois canais (4–20 mA em RG1 e pulsos em P2) -> L/min, sempre a partir do dado bruto ----------
 def flow_cfg(cfg):
     """Parâmetros do medidor no formato de calc.flow_reading (fonte única: config.json)."""
+    mass_no_rho = calc.k_is_mass(cfg["flow_k_unit"]) and cfg.get("flow_k_input") and not cfg["flow_k_pulses_per_l"]
     return {"q4": cfg["cor"]["q4"], "q20": cfg["cor"]["q20"], "range_unit": cfg["cor"]["unit"], "density": cfg["density_g_cm3"],
-            "k_pulses_per_l": cfg["flow_k_pulses_per_l"], "ma_tol": cfg["flow_ma_tol"]}
+            "k_pulses_per_l": cfg["flow_k_pulses_per_l"], "ma_tol": cfg["flow_ma_tol"],
+            "k_reason": "fator K em pulsos/kg: informe a densidade da água em Configurações para obter a vazão volumétrica" if mass_no_rho else None}
 
 
 def flow_value(mode, ma, hz, status, cfg=None, fc=None):
@@ -431,7 +450,7 @@ def store_batch(batch, now):
                 hz = ev["pulse"]["hz"] if "pulse" in ev else r.flow_hz   # os dois canais ficam gravados, qualquer que seja o método
                 full = (ts, r.mass_g, r.temp_c, r.mass_status, r.temp_status, n, r.cor_ma,
                         calc.stored_status(act) if act else None, method if act else None, r.flow_pulses, hz,
-                        r.flow_pulses_total, r.flow_ma_code, r.flow_pulse_code, r.flow_dt_ms)
+                        r.flow_pulses_total, r.flow_ma_code, r.flow_pulse_code, r.flow_dt_ms, r.flow_t1_ms, r.flow_t2_ms, r.flow_tres_ms)
                 if not db.execute(INSERT_SQL, full).rowcount:   # horário já gravado (releitura): completa, nunca piora
                     old = tuple(db.execute(f"SELECT {','.join(COLS)} FROM samples WHERE ts=?", (ts,)).fetchone())
                     merged = merge_sample(old, full)
@@ -917,9 +936,14 @@ def diag_api():
 def public_cfg(cfg):
     c = copy.deepcopy(cfg)
     c["comm"].pop("address", None)   # o endereço do datalogger não é exibido nem editável pela interface
+    lt = state["latest"] or {}
+    tres = lt.get("flow_tres_ms") or SCAN_MS   # resolução EFETIVA dos carimbos de tempo: Scan rápido da v5, ou o Scan do programa
     return c | {"active_mode": MODE, "write_protected": bool(DASHBOARD_TOKEN),
-                "flow_k_value": calc.k_from_pulses_per_l(cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"]),   # K na unidade de exibição
-                "flow_k_units": list(calc.K_UNITS), "ma_fault": calc.MA_FAULT, "scan_ms": SCAN_MS, "duration_min_ms": SCAN_MS}
+                "flow_k_value": cfg.get("flow_k_input") if cfg.get("flow_k_input") is not None else calc.k_from_pulses_per_l(cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"]),
+                "flow_k_mass": calc.k_is_mass(cfg["flow_k_unit"]),
+                "flow_k_units": list(calc.K_UNITS), "ma_fault": calc.MA_FAULT, "scan_ms": SCAN_MS, "duration_min_ms": SCAN_MS,
+                "timing_res_ms": int(tres), "time_resolution_options_ms": list(TIME_RES_MS),
+                "standard": std_get(cfg.get("standard_id")) if cfg.get("standard_id") else None}
 
 
 @app.get("/api/config")
@@ -979,19 +1003,21 @@ def set_config():
             if unit not in calc.K_UNITS:
                 raise ValueError("Unidade do fator K inválida.")
             v = positive(fk.get("value"), "Fator K")
-            cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"] = (None if v is None else calc.k_to_pulses_per_l(v, unit)), unit
+            cfg["flow_k_input"], cfg["flow_k_unit"] = v, unit
+            cfg["flow_k_pulses_per_l"] = None if v is None else calc.k_to_pulses_per_l(v, unit, cfg["density_g_cm3"])
         elif "flow_k_pulses_per_l" in d:   # formato antigo: sempre pulsos/L
             cfg["flow_k_pulses_per_l"] = positive(d["flow_k_pulses_per_l"], "Fator K")
+            cfg["flow_k_input"], cfg["flow_k_unit"] = cfg["flow_k_pulses_per_l"], "pulsos/L"
         if "flow_k_unit" in d and "flow_k" not in d:
             if d["flow_k_unit"] not in calc.K_UNITS:
                 raise ValueError("Unidade do fator K inválida.")
             cfg["flow_k_unit"] = d["flow_k_unit"]
-        if "flow_k_uncertainty_pct" in d:   # opcional; vazio = não informada (a combinação de incertezas diz que K não entrou)
-            v = d["flow_k_uncertainty_pct"]
-            v = None if v in (None, "") else num(v, "Incerteza do fator K")
-            if v is not None and not 0 <= v <= 100:
-                raise ValueError("Incerteza do fator K: use de 0 a 100 %.")
-            cfg["flow_k_uncertainty_pct"] = v
+        if "time_resolution_ms" in d:
+            tr = whole(d["time_resolution_ms"], "Resolução do tempo", 1, 100)
+            if tr not in TIME_RES_MS:
+                raise ValueError("Resolução do tempo: use 100 ms (0,1 s), 10 ms (0,01 s) ou 1 ms (0,001 s).")
+            cfg["time_resolution_ms"] = tr
+        _recompute_k(cfg)   # densidade ou K mudaram: K interno (pulsos/L) acompanha; pulsos/kg sem densidade fica indisponível
         if "flow_ma_tol" in d:
             tol = num(d["flow_ma_tol"], "Tolerância nos limites de 4 e 20 mA")
             if not 0 <= tol <= 0.2:
@@ -1058,6 +1084,173 @@ def set_config():
     pc = public_cfg(cfg)
     sio.emit("config", pc)   # outras abas abertas passam a usar a mesma configuração
     return jsonify(pc)
+
+
+# ---------- padrões de vazão (cadastro único do laboratório) ----------
+STD_COLS = ("id", "tag", "brand", "model", "sn", "manufacturer", "description", "notes", "acq", "k_value", "k_unit", "pulse_cfg",
+            "q4", "q20", "range_unit", "signal_type", "created_ts", "updated_ts")
+STD_TEXT = ("tag", "brand", "model", "sn", "manufacturer", "description", "notes", "pulse_cfg", "signal_type")
+
+
+def std_row(r):
+    return dict(zip(STD_COLS, r)) if r else None
+
+
+def std_get(sid):
+    try:
+        return std_row(q(f"SELECT {','.join(STD_COLS)} FROM standards WHERE id=?", (int(sid),))[0]) if sid is not None else None
+    except (IndexError, ValueError, TypeError):
+        return None
+
+
+def std_list(search=""):
+    s = f"%{search.strip()}%" if search and search.strip() else None
+    where = "WHERE tag LIKE ? OR brand LIKE ? OR model LIKE ? OR sn LIKE ?" if s else ""
+    return [std_row(r) for r in q(f"SELECT {','.join(STD_COLS)} FROM standards {where} ORDER BY tag COLLATE NOCASE", (s, s, s, s) if s else ())]
+
+
+def std_validate(d, cfg):
+    """Campos do cadastro -> dicionário pronto para gravar. Só os parâmetros do tipo de saída escolhido são guardados."""
+    out = {k: (str(d.get(k) or "").strip() or None) for k in STD_TEXT}
+    if not out["tag"]:
+        raise ValueError("Informe a TAG do padrão.")
+    if len(out["tag"]) > 40:
+        raise ValueError("TAG: no máximo 40 caracteres.")
+    acq = d.get("acq")
+    if acq not in FLOW_METHODS:
+        raise ValueError("Tipo de aquisição: use 'pulse' (pulsos) ou 'analog' (4–20 mA).")
+    out["acq"] = acq
+    out.update(k_value=None, k_unit=None, q4=None, q20=None, range_unit=None)
+    if acq == "pulse":
+        unit = d.get("k_unit") or "pulsos/L"
+        if unit not in calc.K_UNITS:
+            raise ValueError("Unidade do fator K inválida.")
+        v = positive(d.get("k_value"), "Fator K")
+        if v is None:
+            raise ValueError("Informe o fator K do padrão por pulsos.")
+        out.update(k_value=v, k_unit=unit)
+        out["pulse_cfg"] = out["pulse_cfg"]
+        out["signal_type"] = None
+    else:
+        unit = d.get("range_unit") or "L/min"
+        if unit not in FLOW_UNITS:
+            raise ValueError("Unidade da faixa 4–20 mA inválida.")
+        q4, q20 = opt_num(d.get("q4"), "Valor em 4 mA"), opt_num(d.get("q20"), "Valor em 20 mA")
+        if q4 is None or q20 is None:
+            raise ValueError("Informe os valores correspondentes a 4 mA e a 20 mA.")
+        if q4 == q20:
+            raise ValueError("O valor em 20 mA precisa ser diferente do valor em 4 mA.")
+        out.update(q4=q4, q20=q20, range_unit=unit, pulse_cfg=None)
+    return out
+
+
+def std_apply(cfg, s):
+    """Copia os parâmetros do padrão para a configuração ativa (o ensaio congela a própria cópia em trials.start)."""
+    cfg["standard_id"] = s["id"]
+    if s["acq"] == "pulse":
+        cfg["flow_k_input"], cfg["flow_k_unit"] = s["k_value"], s["k_unit"]
+        _recompute_k(cfg)
+    else:
+        cfg["cor"] = {"q4": s["q4"], "q20": s["q20"], "unit": s["range_unit"]}
+    cfg["flow_method"] = s["acq"]
+
+
+@app.get("/api/standards")
+def standards_list():
+    return jsonify(standards=std_list(request.args.get("q", "")), selected_id=load_cfg().get("standard_id"))
+
+
+@app.post("/api/standards")
+@guarded
+def standards_create():
+    d = request.get_json(silent=True) or {}
+    try:
+        v = std_validate(d, load_cfg())
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    now = int(time.time() * 1000)
+    cols = [c for c in STD_COLS if c not in ("id",)]
+    vals = [v.get(c) for c in cols[:-2]] + [now, now]
+    try:
+        with lock:
+            cur = db.execute(f"INSERT INTO standards({','.join(cols)}) VALUES({','.join('?' * len(cols))})", vals)
+            db.commit()
+    except sqlite3.IntegrityError:
+        return jsonify(error=f"Já existe um padrão com a TAG {v['tag']}."), 409
+    log.info("padrão cadastrado: %s (%s)", v["tag"], v["acq"])
+    return jsonify(std_get(cur.lastrowid)), 201
+
+
+@app.route("/api/standards/<int:sid>", methods=["PUT", "DELETE"])
+@guarded
+def standards_update(sid):
+    cur = std_get(sid)
+    if not cur:
+        return jsonify(error="Padrão não encontrado."), 404
+    cfg = load_cfg()
+    if request.method == "DELETE":
+        if trials.has_running() and cfg.get("standard_id") == sid:
+            return jsonify(error="Este padrão está em uso num ensaio em andamento."), 409
+        with lock:
+            db.execute("DELETE FROM standards WHERE id=?", (sid,))
+            db.commit()
+        if cfg.get("standard_id") == sid:   # a seleção some; os parâmetros copiados continuam válidos até outro padrão ser escolhido
+            cfg = copy.deepcopy(cfg)
+            cfg["standard_id"] = None
+            save_cfg(cfg)
+            sio.emit("config", public_cfg(cfg))
+        log.info("padrão excluído: %s (os ensaios já realizados mantêm a cópia dos parâmetros)", cur["tag"])
+        return jsonify(ok=True)
+    d = request.get_json(silent=True) or {}
+    try:
+        v = std_validate(d, cfg)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    v["updated_ts"] = int(time.time() * 1000)
+    cols = [c for c in STD_COLS if c not in ("id", "created_ts")]
+    try:
+        with lock:
+            db.execute(f"UPDATE standards SET {','.join(c + '=?' for c in cols)} WHERE id=?", [v.get(c) for c in cols] + [sid])
+            db.commit()
+    except sqlite3.IntegrityError:
+        return jsonify(error=f"Já existe um padrão com a TAG {v['tag']}."), 409
+    s = std_get(sid)
+    if cfg.get("standard_id") == sid and not trials.has_running():   # padrão em uso ao vivo: a leitura ao vivo acompanha; ensaios feitos não mudam
+        cfg = copy.deepcopy(cfg)
+        std_apply(cfg, s)
+        if cfg["flow_method"] != FLOW["requested"] and method_refusal(cfg["flow_method"]):
+            cfg["flow_method"] = FLOW["requested"]
+        save_cfg(cfg)
+        if cfg["flow_method"] != FLOW["requested"]:
+            set_requested(cfg["flow_method"])
+        sio.emit("config", public_cfg(cfg))
+    log.info("padrão editado: %s", s["tag"])
+    return jsonify(s)
+
+
+@app.post("/api/standards/<int:sid>/select")
+@guarded
+def standards_select(sid):
+    """Seleciona o padrão: copia K/unidade ou faixa 4–20 mA para a configuração e pede o método correspondente.
+    O método só aparece como ATIVO quando o datalogger confirma; se o programa carregado não tem o canal, a seleção
+    vale (parâmetros carregados) e a resposta traz `method_error`."""
+    s = std_get(sid)
+    if not s:
+        return jsonify(error="Padrão não encontrado."), 404
+    if trials.has_running():
+        return jsonify(error="Há um ensaio em andamento: troque o padrão depois que ele terminar."), 409
+    cfg = copy.deepcopy(load_cfg())
+    std_apply(cfg, s)
+    err = method_refusal(s["acq"]) if s["acq"] != FLOW["requested"] else None
+    if err:
+        cfg["flow_method"] = FLOW["requested"]
+    save_cfg(cfg)
+    if cfg["flow_method"] != FLOW["requested"]:
+        set_requested(cfg["flow_method"])
+    pc = public_cfg(cfg)
+    sio.emit("config", pc)
+    log.info("padrão selecionado: %s (%s)%s", s["tag"], s["acq"], f"; método não solicitado: {err[1]}" if err else "")
+    return jsonify(config=pc, flow=flow_status(), method_error=err[1] if err else None)
 
 
 # ---------- medidor de vazão: método de aquisição ----------

@@ -173,31 +173,11 @@ def test_tempo_configurado_nao_substitui_o_tempo_medido():
     assert f["pulses_total"] == 3000 and f["time_eff_ms"] == 30_000 and f["volume_l"] == pytest.approx(30.0) and f["flow_l_min"]["mean"] == pytest.approx(60.0)
 
 
-# ---------------- incerteza: só componentes demonstráveis, combinadas em quadratura
-def test_incerteza_do_exemplo_1250_pulsos():
-    u = calc.pulse_uncertainty(1250, 100.0, 60.0)
-    assert u["pulses_rel_pct"] == pytest.approx(100 / (1250 * math.sqrt(3)))          # 0,0462 %
-    assert u["clock_rel_pct"] == pytest.approx(100 * 3 / (365.25 * 24 * 60))          # 0,00057 % (±3 min/ano)
-    assert u["k_rel_pct"] is None and u["k_included"] is False
-    assert u["flow_rel_pct"] == pytest.approx(math.hypot(u["pulses_rel_pct"], u["clock_rel_pct"]))
-    assert u["volume_u_l"] == pytest.approx(12.5 * u["volume_rel_pct"] / 100) and u["flow_u_l_min"] == pytest.approx(12.5 * u["flow_rel_pct"] / 100)
-
-
-def test_incerteza_do_k_so_entra_quando_informada():
-    com = calc.pulse_uncertainty(1250, 100.0, 60.0, k_rel_pct=0.5)
-    assert com["k_included"] and com["flow_rel_pct"] == pytest.approx(math.sqrt(0.5 ** 2 + com["pulses_rel_pct"] ** 2 + com["clock_rel_pct"] ** 2))
-    assert calc.pulse_uncertainty(0, 100.0, 60.0) is None and calc.pulse_uncertainty(10, 100.0, 0) is None
-    sem_k = calc.pulse_uncertainty(10, None, 10.0)
-    assert sem_k["pulses_rel_pct"] == pytest.approx(100 / (10 * math.sqrt(3))) and sem_k["volume_u_l"] is None   # sem K não há volume a qualificar
-
-
-def test_incerteza_no_resultado_do_ensaio_e_coerente_com_N():
-    e = Env({"flow_k_pulses_per_l": 100.0, "flow_k_uncertainty_pct": 0.2})
-    pulses = {s: 21 if s - 5 < 50 else 20 for s in range(5, 65)}
-    f = e.run(pulses=lambda s: pulses.get(s, 0))["result"]["flow"]
-    u = f["uncertainty"]
-    assert u["k_included"] and u["k_rel_pct"] == 0.2 and u["pulses_rel_pct"] == pytest.approx(100 / (1250 * math.sqrt(3)))
-    assert u["flow_u_l_min"] == pytest.approx(12.5 * u["flow_rel_pct"] / 100)
+# ---------------- sem incerteza no sistema (decisão do laboratório): o resultado do ensaio não traz esse bloco
+def test_resultado_do_ensaio_nao_calcula_incerteza():
+    e = Env({"flow_k_pulses_per_l": 100.0})
+    f = e.run(pulses=20)["result"]["flow"]
+    assert "uncertainty" not in f and not hasattr(calc, "pulse_uncertainty")
 
 
 def test_consistencia_dimensional_da_cadeia():
@@ -232,11 +212,7 @@ def test_serie_e_resumo_preservam_vazoes_pequenas(v4):
     assert st["flow"]["min"] == pytest.approx(0.0006, rel=1e-6) and st["pulses"]["n"] >= 3
 
 
-def test_config_aceita_incerteza_do_k_opcional(v4):
+def test_config_ignora_chave_de_incerteza_de_versao_intermediaria(v4):
     app, fake, c = v4
     st, j = post(c, "/api/config", {"flow_k_uncertainty_pct": "0,5"})
-    assert st == 200 and j["flow_k_uncertainty_pct"] == 0.5
-    st, j = post(c, "/api/config", {"flow_k_uncertainty_pct": ""})
-    assert st == 200 and j["flow_k_uncertainty_pct"] is None
-    st, j = post(c, "/api/config", {"flow_k_uncertainty_pct": 150})
-    assert st == 400
+    assert st == 200 and "flow_k_uncertainty_pct" not in j

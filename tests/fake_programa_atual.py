@@ -20,12 +20,15 @@ BASE_FIELDS = {
 }
 VAZAO_V3 = [("Flow_mV", "xsd:float"), ("Flow_mA", "xsd:float"), ("Flow_Status", "xsd:long"), ("Flow_mode", "xsd:long")]
 VAZAO_V4 = VAZAO_V3 + [("Flow_Pulsos", "xsd:float"), ("Flow_PulsosTot", "xsd:long"), ("Flow_PStatus", "xsd:long")]
+# v5: carimbos do Timer do datalogger (ms dentro do segundo) do 1o e do ultimo sub-Scan com pulsos + intervalo do Scan rapido
+VAZAO_V5 = VAZAO_V4 + [("Flow_T1_ms", "xsd:long"), ("Flow_T2_ms", "xsd:long"), ("Flow_ScanF_ms", "xsd:long")]
 
 
 class Fake:
-    def __init__(self, prefill=120, lag=0.0, tip_every=20, ring=20000, schema="v4"):
+    def __init__(self, prefill=120, lag=0.0, tip_every=20, ring=20000, schema="v4", fast_ms=10, first_pulse_ms=None):
         self.lag, self.tip_every, self.ring, self.schema = lag, tip_every, ring, schema
-        self.fields = dict(BASE_FIELDS, Vazao1s=VAZAO_V4 if schema == "v4" else VAZAO_V3)
+        self.fast_ms, self.first_pulse_ms = fast_ms, first_pulse_ms   # v5: Scan rapido e instante (ms no segundo) do 1o sub-Scan com pulsos
+        self.fields = dict(BASE_FIELDS, Vazao1s={"v5": VAZAO_V5, "v4": VAZAO_V4}.get(schema, VAZAO_V3))
         self.tables = {n: [] for n in self.fields}
         self.next_no = {n: 0 for n in self.fields}
         self.lock = threading.Lock()
@@ -60,7 +63,7 @@ class Fake:
         nan = ma == "NAN"
         st = self.flow_status if self.flow_status is not None else (3 if nan else 1 if ma < 4 else 2 if ma > 20 else 0)
         row = ["NAN" if nan else round(ma * 10, 4), ma, st, 2]
-        if self.schema == "v4":
+        if self.schema in ("v4", "v5"):
             if self.first_flow:            # 1a execucao do PulseCount: janela incompleta
                 cnt, pst, self.first_flow = 0, 1, False
             else:
@@ -69,6 +72,9 @@ class Fake:
             if pst == 0:
                 self.ptotal += cnt
             row += [cnt, self.ptotal, pst]
+            if self.schema == "v5":       # pulsos uniformes no segundo: 1o sub-Scan com pulso termina em fast_ms (ou no instante pedido), o ultimo em 1000 ms
+                t1 = (self.first_pulse_ms if self.first_pulse_ms is not None else self.fast_ms) if cnt > 0 else "NAN"
+                row += [t1, 1000 if cnt > 0 else "NAN", self.fast_ms]
         return row
 
     def tick(self, sleep=True):

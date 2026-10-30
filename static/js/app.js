@@ -1,5 +1,5 @@
 const RANGES = { '1m': 60, '15m': 900, '1h': 3600, '6h': 21600, '24h': 86400 };
-const TITLES = { dashboard: 'Dashboard', graficos: 'Gráficos', historico: 'Histórico', config: 'Configurações' };
+const TITLES = { dashboard: 'Dashboard', graficos: 'Gráficos', historico: 'Histórico', padroes: 'Padrões', config: 'Configurações' };
 const RLABEL = { '1m': '1 min', '15m': '15 min', '1h': '1 h', '6h': '6 h', '24h': '24 h', custom: 'período personalizado' };
 const LAB = { no_comm: 'Sem comunicação', invalid: 'Leitura inválida', out_of_range: 'Fora da faixa', fault: 'Falha do sinal', unavailable: 'Canal indisponível' };
 const PAGE = 50;
@@ -137,7 +137,7 @@ function renderBal() {
   det.hidden = !done;
   if (done && key !== S.detKey) {   // só reescreve quando muda: não fecha nem rola o painel aberto
     const d = { ...S.cfg, density_g_cm3: done.cfg.density };
-    $('#bal-det-body').innerHTML = Trials.summary(done) + (done.kind === 'flow' ? Trials.flowHtml(done.result, d, false) : Trials.pluvHtml(done.result, d, false, 'bal')) + Trials.timingHtml(done.result) + Trials.links(done.id);
+    $('#bal-det-body').innerHTML = Trials.summary(done) + (done.kind === 'flow' ? Trials.flowHtml(done.result, d, false) : Trials.pluvHtml(done.result, d, false, 'bal')) + Trials.timingHtml(done.result, done.kind) + Trials.links(done.id);
   }
   S.detKey = key;
   renderTrialCtl(x, done);
@@ -307,8 +307,8 @@ async function loadHistory() {
 async function loadTrials() { Trials.st = await Api.get('/api/trials'); renderBal(); renderPluv(); renderTrialHistory(); }
 function renderTrialHistory() {
   const h = Trials.st.history || [];
-  $('#tr-hist').innerHTML = h.map(t => { const [lab, cls] = Trials.STATE[t.state] || [t.state, '']; return `<tr><td>${Fmt.dt(t.start_ts)}</td><td>${Trials.KIND[t.kind] || t.kind}</td><td class="${cls}">${lab}</td><td>${Trials.dur(t.end_ts - t.start_ts)} de ${Trials.dur(t.duration_cfg_ms != null ? t.duration_cfg_ms : t.duration_cfg_s * 1000)}</td><td>${esc(t.reason || '')}</td><td><button class="btn" data-id="${t.id}">Ver</button></td></tr>`; }).join('')
-    || '<tr><td colspan="6" class="lbl">Nenhum ensaio realizado.</td></tr>';
+  $('#tr-hist').innerHTML = h.map(t => { const [lab, cls] = Trials.STATE[t.state] || [t.state, '']; return `<tr><td>${Fmt.dt(t.start_ts)}</td><td>${Trials.KIND[t.kind] || t.kind}</td><td>${t.kind === 'flow' ? (t.standard_tag ? `<b>${esc(t.standard_tag)}</b>` : '<span class="lbl">sem padrão</span>') : '—'}</td><td class="${cls}">${lab}</td><td>${Trials.dur(t.end_ts - t.start_ts)} de ${Trials.dur(t.duration_cfg_ms != null ? t.duration_cfg_ms : t.duration_cfg_s * 1000)}</td><td>${esc(t.reason || '')}</td><td><button class="btn" data-id="${t.id}">Ver</button></td></tr>`; }).join('')
+    || '<tr><td colspan="7" class="lbl">Nenhum ensaio realizado.</td></tr>';
   $$('#tr-hist button').forEach(b => b.onclick = async () => {
     const t = await Api.get('/api/trials/' + b.dataset.id), el = $('#tr-detail'); el.hidden = false;
     el.innerHTML = Trials.detail(t, S.cfg) + Trials.links(t.id);
@@ -343,6 +343,11 @@ async function saveDuration(unitOnly) {
 function fillConfig() {
   const c = S.cfg, f = v => v == null ? '' : String(v).replace('.', ',');
   $('#cf-vmode').value = S.vmode;
+  $('#cf-tres').value = String(c.time_resolution_ms || 100);
+  const eff = c.timing_res_ms || c.scan_ms || 1000, sel = c.time_resolution_ms || 100;   // efetiva = a do programa do datalogger; nunca a escolhida sozinha
+  $('#cf-tres-eff').textContent = eff > sel
+    ? `Resolução efetiva do datalogger hoje: ${Trials.dur(eff)} (${eff === 1000 ? 'programa com Scan de 1 s, sem carimbos do Timer' : 'Scan rápido do programa'}). O tempo será exibido e registrado com essa resolução; a escolhida passa a valer quando o programa a fornecer.`
+    : `Resolução efetiva do datalogger: ${Trials.dur(eff)}. O tempo é registrado com os carimbos do Timer do datalogger e exibido com ${Trials.durDec(sel)} casa(s) decimal(is).`;
   $('#cf-unit').value = c.mass_unit; $('#cf-tunit').value = c.temp_unit; $('#cf-funit').value = c.flow_unit;
   $('#cf-md').value = c.mass_decimals; $('#cf-td').value = c.temp_decimals; $('#cf-fd').value = c.flow_decimals;
   $('#cf-res').value = f(c.tip_resolution_mm); $('#cf-dens').value = f(c.density_g_cm3); $('#cf-area').value = f(c.catch_area_cm2);
@@ -354,7 +359,8 @@ async function saveConfig() {
   try {
     S.cfg = await Api.post('/api/config', { mass_unit: $('#cf-unit').value, temp_unit: $('#cf-tunit').value, flow_unit: $('#cf-funit').value,
       mass_decimals: $('#cf-md').value, temp_decimals: $('#cf-td').value, flow_decimals: $('#cf-fd').value,
-      tip_resolution_mm: $('#cf-res').value, density_g_cm3: $('#cf-dens').value, catch_area_cm2: $('#cf-area').value, default_range_s: $('#cf-range').value });
+      tip_resolution_mm: $('#cf-res').value, density_g_cm3: $('#cf-dens').value, catch_area_cm2: $('#cf-area').value, default_range_s: $('#cf-range').value,
+      time_resolution_ms: $('#cf-tres').value });
     S.vmode = $('#cf-vmode').value === 'flow' ? 'flow' : 'precip'; store.set('elus.vmode', S.vmode);   // preferência desta tela (não vai ao servidor)
     $('#cf-msg').textContent = 'Configurações salvas. Ensaios em andamento e já concluídos não mudam.';
     onConfigChanged();
@@ -362,8 +368,8 @@ async function saveConfig() {
 }
 // configuração nova (desta aba, do painel do medidor ou de outra aba via Socket.IO): tudo que depende dela é redesenhado
 function onConfigChanged() {
-  fillConfig(); S.detKey = S.plDetKey = null;   // painéis de detalhes são reconstruídos com as unidades novas
-  FlowUI.setStatus(); renderLatest(); refreshSummary();
+  fillConfig(); S.detKey = S.plDetKey = S.corDetKey = null;   // painéis de detalhes são reconstruídos com as unidades novas
+  FlowUI.setStatus(); Standards.renderHero(); renderLatest(); refreshSummary();
   if (view() === 'graficos') refreshCharts();
 }
 
@@ -388,12 +394,12 @@ function setChips() {
   if (S.range.key === 'custom') { const r = getRange(); $('#c-from').value = Fmt.local(r.from); $('#c-to').value = Fmt.local(r.to); }
 }
 function setRange(r) { S.range = r; S.page = 0; setChips(); refreshAll(); }
-function refreshAll() { const v = view(); if (v === 'dashboard') refreshSummary(); if (v === 'graficos') refreshCharts(); if (v === 'historico') loadHistory(); if (v === 'config') fillConfig(); }
+function refreshAll() { const v = view(); if (v === 'dashboard') refreshSummary(); if (v === 'graficos') refreshCharts(); if (v === 'historico') loadHistory(); if (v === 'config') fillConfig(); if (v === 'padroes') Standards.load().catch(() => {}); }
 function route() {
   const v = view();
   $$('.view').forEach(e => { e.hidden = e.id !== 'v-' + v; });
   $$('.nav button').forEach(b => { const on = b.dataset.v === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-  $('#title').textContent = TITLES[v]; $('#ctrl').hidden = v === 'config'; $('#meth').hidden = v === 'historico';
+  $('#title').textContent = TITLES[v]; $('#ctrl').hidden = v === 'config' || v === 'padroes'; $('#meth').hidden = v === 'historico';
   refreshAll();
   if (v === 'dashboard') requestAnimationFrame(() => FlowUI.thumb());
 }
@@ -414,7 +420,7 @@ $$('#flow-method button').forEach(b => b.onclick = () => FlowUI.request(b.datase
 const openFlow = (e, tab) => Drawer.open(tab || (FlowUI.st && FlowUI.st.requested === 'analog' ? 'analog' : 'pulse'), e.currentTarget);
 $('#flow-gear').onclick = e => openFlow(e); $('#cf-flow-open').onclick = e => openFlow(e);
 $('#cor-note').addEventListener('click', e => { const b = e.target.closest('[data-open-flow]'); if (b) Drawer.open(b.dataset.openFlow, b); });
-Drawer.bind();
+Drawer.bind(); Standards.bindHero(); Standards.bindTab();
 window.addEventListener('hashchange', () => { try { const h = location.hash.slice(1); if (h in TITLES && h !== current) { current = h; route(); } } catch (e) {} });
 
 (async () => {
@@ -423,10 +429,11 @@ window.addEventListener('hashchange', () => { try { const h = location.hash.slic
   fillConfig();
   S.range = { key: Object.keys(RANGES).find(k => RANGES[k] === S.cfg.default_range_s) || '15m' };
   setChips(); applyMethod();
+  Standards.load().catch(() => Standards.renderHero());
   Api.connect({
     sample: onSample,
     conn: ok => { S.sock = ok; setPills(); if (ok) { loadTrials().catch(() => {}); loadEvents().catch(() => {}); Api.get('/api/flow').then(st => FlowUI.setStatus(st)).catch(() => {}); } },   // reconectou: ressincroniza
-    trial: t => { const was = Trials.st.running; Trials.st = { ...Trials.st, running: t.running, last: t.last }; renderBal(); renderPluv(); FlowUI.renderCard(); if (was && !t.running) loadTrials(); },
+    trial: t => { const was = Trials.st.running; Trials.st = { ...Trials.st, running: t.running, last: t.last }; renderBal(); renderPluv(); FlowUI.renderCard(); Standards.renderHero(); if (was && !t.running) loadTrials(); },
     flow: st => FlowUI.setStatus(st),
     config: c => { if (JSON.stringify(c) !== JSON.stringify(S.cfg) && (!Drawer.isOpen() || !Drawer.dirty())) { S.cfg = c; onConfigChanged(); } },   // não atropela um formulário sendo editado
   });
