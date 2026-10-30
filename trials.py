@@ -105,6 +105,22 @@ def flow_of_row(d, cfg):
     return _analog_lm(r, cfg)
 
 
+def timing(ts, cfg, start, end, scan_ms):
+    """Temporização do ensaio, só com carimbos do DATALOGGER (ms, resolução = Scan). Três tempos, sem misturar:
+      cfg_ms    = duração configurada pelo operador (preservada como digitada, em ms)
+      window_ms = janela [start, end) usada no cálculo (= cfg_ms quando o ensaio chega ao fim previsto)
+      eff_ms    = tempo efetivamente coberto pelos registros: do 1º ao último carimbo, mais um Scan (o registro em t cobre (t−Scan, t])
+    diff_ms = eff − cfg. Sem registros: eff/diff = None (nunca zero). `wall_ms` (relógio do PC) entra em _finish, só como informação.
+    Isto NÃO calibra o temporizador: é o registro necessário para comparar com uma referência externa de tempo."""
+    cfg_ms = cfg.get("duration_ms")
+    if cfg_ms is None and cfg.get("duration_s") is not None:
+        cfg_ms = int(round(float(cfg["duration_s"]) * 1000))
+    eff = (ts[-1] - ts[0] + scan_ms) if ts else None
+    return {"start_ts": start, "end_ts": end, "cfg_ms": cfg_ms, "window_ms": end - start, "resolution_ms": scan_ms,
+            "first_sample_ts": ts[0] if ts else None, "last_sample_ts": ts[-1] if ts else None, "samples": len(ts),
+            "eff_ms": eff, "diff_ms": (eff - cfg_ms) if eff is not None and cfg_ms is not None else None, "wall_ms": None}
+
+
 def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
     """Resultado de uma janela [start, end) a partir SÓ das linhas e basculadas fornecidas.
 
@@ -116,7 +132,7 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
     q = {"window_s": (end - start) / 1000, "covered_s": cov / 1000, "gaps": gaps, "rows": len(rows),
          "coverage_complete": complete, "reasons": []}
     res = cfg.get("res_mm")
-    out = {"quality": q, "flow": None, "gravimetric": None, "pluviometer": None, "temperature": None}
+    out = {"quality": q, "flow": None, "gravimetric": None, "pluviometer": None, "temperature": None, "timing": timing(ts, cfg, start, end, scan_ms)}
 
     # ---- temperatura (informativa: densidade e área NÃO são deduzidas dela)
     tv = [r[2] for r in rows if r[2] is not None]
@@ -406,6 +422,8 @@ class Trials:
         if state == "incomplete" and not reason:
             reason = "; ".join(res["quality"]["reasons"])
         res["quality"]["effective_window_s"] = (end - start) / 1000
+        fin_wall = int(time.time() * 1000)
+        res["timing"]["wall_ms"] = fin_wall - run["started_wall"]   # relógio do PC (início do pedido → encerramento): só informativo
         with self.lock:
             if not self.db.execute("SELECT 1 FROM trials WHERE id=? AND state='running'", (run["id"],)).fetchone():
                 return self.get(run["id"])   # outra thread (tick × stop) já encerrou este ensaio
@@ -413,7 +431,7 @@ class Trials:
                 self.db.executemany("INSERT INTO trial_samples(trial_id," + SCOLS + ") VALUES(?" + ",?" * len(SCOLS_LIST) + ")", [(run["id"],) + tuple(r) for r in s])
                 self.db.executemany("INSERT INTO trial_tips(trial_id,ts,src) VALUES(?,?,?)", [(run["id"], a, b) for a, b in t])
                 self.db.execute("UPDATE trials SET state=?, end_ts=?, finished_wall=?, reason=?, result=? WHERE id=? AND state='running'",
-                                (state, end, int(time.time() * 1000), reason, json.dumps(res), run["id"]))
+                                (state, end, fin_wall, reason, json.dumps(res), run["id"]))
                 self.db.commit()
             except Exception:
                 self.db.rollback()
