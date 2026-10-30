@@ -16,6 +16,7 @@ const Fmt = {
   int: v => v == null || isNaN(v) ? '—' : Math.round(v).toLocaleString('pt-BR'),
   time: t => { if (t == null) return '—'; const d = new Date(t); return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`; },
   dt: t => { if (t == null) return '—'; const d = new Date(t); return `${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()} ${Fmt.time(t)}`; },
+  dtms: t => t == null ? '—' : `${Fmt.dt(t)},${String(new Date(t).getMilliseconds()).padStart(3, '0')}`,   // carimbo com milissegundos (temporização do ensaio)
   tick: (t, span) => { const d = new Date(t), h = `${p2(d.getHours())}:${p2(d.getMinutes())}`; return span > 864e5 ? `${p2(d.getDate())}/${p2(d.getMonth() + 1)} ${h}` : h; },
   local: ms => new Date(ms - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16),
 };

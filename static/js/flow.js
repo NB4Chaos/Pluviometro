@@ -1,7 +1,7 @@
 // Medidor de vazão na interface: card ao vivo, seletor Analógico/Pulso e painel de parâmetros (Método Comparativo).
 // Regra de integridade: um método só aparece como ATIVO depois que o servidor calculou uma amostra do datalogger com ele.
 // Antes disso a tela mostra "solicitado · aguardando", nunca o valor do método anterior como se fosse do novo.
-const MLABEL = { analog: 'Analógico', pulse: 'Pulso' };
+const MLABEL = { analog: 'Analógico', pulse: 'Pulsos' };
 const MLONG = { analog: 'pelo canal 4–20 mA', pulse: 'por pulsos' };
 const MA_FAULT = 3.6;
 // espelho de calc.classify_ma só para PRÉ-VISUALIZAR no painel; o servidor é quem classifica as leituras
@@ -55,11 +55,11 @@ const FlowUI = {
     else if (this.msg) { cls = 'err'; txt = this.msg; }
     else if (locked) { cls = 'lock'; icon = 'i-lock'; txt = `Método fixo durante o ensaio: ${MLABEL[act || req]}`; }
     else if (!has.length) { cls = 'pending'; txt = 'Aguardando o datalogger informar os canais disponíveis'; }
-    else if (req !== act && !has.includes(req)) { cls = 'err'; txt = `${MLABEL[req]} indisponível no programa carregado`; }
+    else if (req !== act && !has.includes(req)) { cls = 'err'; txt = `${MLABEL[req]}: indisponível no programa carregado`; }
     else if (req !== act) {
       cls = stale ? 'err' : 'pending';
-      txt = stale ? `${MLABEL[req]} solicitado · sem dados do datalogger para confirmar` : `${MLABEL[req]} solicitado · aguardando a primeira leitura calculada com ele`;
-    } else { cls = 'ok'; txt = `${MLABEL[act]} ativo · confirmado por dado do datalogger${st.confirmed_at ? ' às ' + Fmt.time(st.confirmed_at) : ''}`; }
+      txt = stale ? `${MLABEL[req]}: solicitado, sem dados do datalogger para confirmar` : `${MLABEL[req]}: solicitado, aguardando a primeira leitura calculada com ele`;
+    } else { cls = 'ok'; txt = `${MLABEL[act]}: ativo, confirmado por dado do datalogger${st.confirmed_at ? ' às ' + Fmt.time(st.confirmed_at) : ''}`; }
     line.className = 'mstate ' + cls;
     setHtml(line, (icon ? `<svg class="ic" aria-hidden="true"><use href="#${icon}"/></svg>` : '<i class="dot" aria-hidden="true"></i>') + `<span>${esc(txt)}</span>`);
   },
@@ -79,36 +79,88 @@ const FlowUI = {
   },
 
   // ---------- card ----------
+  // Valor principal por método: analógico = vazão instantânea (corrente em mA ao lado); pulsos = CONTAGEM BRUTA no último Scan
+  // (a vazão aparece só como valor calculado, etiquetado). No ensaio comparativo o card mostra o ensaio: pulsos acumulados / vazão
+  // instantânea enquanto roda e, ao fim, N, Δt efetivo, vazão média e volume calculados, com a balança como referência.
+  STATE_TXT: { unconfigured: 'Não configurado', out_of_range: 'Fora da faixa', fault: 'Falha do sinal', invalid: 'Leitura inválida', unavailable: 'Indisponível', no_comm: 'Sem comunicação' },
   renderCard() {
     const st = this.st, cfg = S.cfg;
     if (!cfg || !st) return;
-    const s = S.latest, f = s && s.flow, fu = cfg.flow_unit;
-    let val = '—', unit = fu, textual = false, note = '', pst = 'stale', sig = '', xc = null;
+    const s = S.latest, f = s && s.flow, fu = cfg.flow_unit, K = Trials.kv.bind(Trials), x = typeof trial === 'function' ? trial() : null, xf = x && x.t.kind === 'flow' ? x : null;
+    let val = '—', unit = fu, name = 'Vazão instantânea', textual = false, note = '', pst = 'stale', sig = '', xc = null, rows = '', notes = [];
+    const liveMethod = f && f.integrated && !this.busy && f.method === st.requested ? f.method : null, fresh = !isStale() && !!liveMethod;
+    // ---- leitura ao vivo
     if (!st.integrated) { val = 'Aguardando integração'; textual = true; unit = ''; pst = 'na'; }
     else if (isStale() || !f || !f.integrated) pst = 'stale';                        // leitura antiga não fica na tela como atual
-    else if (this.busy || f.method !== st.requested) { pst = 'pending'; note = `Aguardando a primeira leitura ${MLONG[this.busy || st.requested]}.`; }
+    else if (!liveMethod) { pst = 'pending'; note = `Aguardando a primeira leitura ${MLONG[this.busy || st.requested]}.`; }
     else {
       pst = f.state; sig = this.signal(f); xc = this.cross(f);
-      if (f.state === 'ok') {
-        const v = flowL(f.lmin);
-        if (v == null) note = esc(DENS_MSG); else val = fnum(v);
-        if (f.clamp) note = `No limite de ${f.clamp === 'low' ? 4 : 20} mA: ${Fmt.num(f.ma, 3)} mA está dentro da tolerância de ${Fmt.num(cfg.flow_ma_tol, 3)} mA e foi tratado como ${f.clamp === 'low' ? 4 : 20} mA.`;
-      } else {
-        textual = true; unit = '';
-        val = { unconfigured: 'Não configurado', out_of_range: 'Fora da faixa', fault: 'Falha do sinal', invalid: 'Leitura inválida', unavailable: 'Indisponível', no_comm: 'Sem comunicação' }[f.state] || 'Sem dados';
+      const v = f.state === 'ok' ? flowL(f.lmin) : null, vtxt = f.state === 'ok' ? (v == null ? '—' : fnum(v)) : (this.STATE_TXT[f.state] || '—');
+      if (f.state === 'ok' && v == null) note = esc(DENS_MSG);
+      if (f.state === 'ok' && f.clamp) note = `No limite de ${f.clamp === 'low' ? 4 : 20} mA: ${Fmt.num(f.ma, 3)} mA está dentro da tolerância de ${Fmt.num(cfg.flow_ma_tol, 3)} mA e foi tratado como ${f.clamp === 'low' ? 4 : 20} mA.`;
+      if (f.state !== 'ok') {
         note = esc(f.reason ? f.reason.charAt(0).toUpperCase() + f.reason.slice(1) + '.' : '');
         if (f.state === 'unconfigured') note += ` <button type="button" class="btn sm" data-open-flow="${f.method}">Configurar</button>`;
-        if (f.state === 'fault') note += ' No modo “4–20 mA + alarme” o MAG 5000 sinaliza erro com 1,3, 2 ou 3 mA.';
+        if (f.state === 'fault') note += ' No modo “4–20 mA + alarme” o medidor sinaliza erro com 1,3, 2 ou 3 mA.';
+      }
+      if (liveMethod === 'pulse') {   // adquirido em destaque; calculado etiquetado
+        if (f.pulses != null) { val = Fmt.int(f.pulses); unit = 'pulsos'; name = `Pulsos brutos no último Scan (${Fmt.num(f.window_s, 2)} s)`; }
+        else { val = this.STATE_TXT[f.state] || 'Sem contagem'; textual = true; unit = ''; name = 'Pulsos brutos no último Scan'; }
+        rows = K('Vazão instantânea (pulsos ÷ K ÷ janela)', vtxt, f.state === 'ok' && v != null ? fu : '', CALC) + K('Frequência', Fmt.num(f.hz, 1), 'Hz') + K('Contador do datalogger', s.pulses_total == null ? '—' : Fmt.int(s.pulses_total));
+      } else {
+        val = vtxt; textual = f.state !== 'ok' || v == null; if (textual) unit = '';
+        name = 'Vazão instantânea · canal 4–20 mA';
+        rows = K('Corrente', f.ma == null ? '—' : Fmt.num(f.ma, 3), 'mA', f.clamp ? ['p', 'no limite'] : '') + (cfg.cor.q4 != null ? K('Faixa configurada', `${Fmt.sig(cfg.cor.q4)} → ${Fmt.sig(cfg.cor.q20)}`, cfg.cor.unit, ['f', 'configurado']) : '');
       }
     }
-    $('#cor-val').textContent = val; $('#cor-unit').textContent = unit;
-    $('#cor-big').className = 'big sm' + (textual ? ' txt' : '');
+    // ---- ensaio comparativo: o card do medidor mostra o ensaio (parcial enquanto roda, congelado ao fim)
+    const tagEl = $('#cor-state');
+    if (xf) {
+      const r = xf.f || {}, g = xf.g || {}, tm = xf.t.partial && xf.t.partial.timing, mode = r.mode || (xf.run ? (st.active || st.requested) : null), P = xf.run ? PARC : CALC, c = v => flowL(v), q = r.flow_l_min;
+      const refRows = K('Vazão de referência (balança)', fnum(c(g.flow_ref_l_min)), fu, REF) + K('Volume de referência (balança)', Fmt.num(g.volume_ml, 1), 'mL', REF)
+        + (r.vs_reference ? K('Erro do medidor', r.vs_reference.error_pct == null ? '—' : Fmt.num(r.vs_reference.error_pct, 2), '%', P) : '');
+      if (xf.run) {
+        if (mode === 'pulse') {
+          val = r.pulses_total == null ? '—' : Fmt.int(r.pulses_total); unit = 'pulsos'; textual = false; name = 'Pulsos brutos acumulados no ensaio';
+          rows = Trials.timeRows(xf.t, xf.t.partial) + K('Pulsos no último Scan', fresh && f.pulses != null ? Fmt.int(f.pulses) : '—')
+            + K('Vazão média (N ÷ K ÷ Δt)', fnum(c(q && q.mean)), fu, PARC) + K('Volume (N ÷ K)', Fmt.num(r.volume_l, 3), 'L', PARC) + refRows;
+        } else {
+          name = 'Vazão instantânea · ensaio em andamento';
+          rows = Trials.timeRows(xf.t, xf.t.partial) + K('Corrente', fresh && f.ma != null ? Fmt.num(f.ma, 3) : '—', 'mA')
+            + K('Vazão média', fnum(c(q && q.mean)), fu, PARC) + K('Volume (∫ vazão)', Fmt.num(r.volume_l, 3), 'L', PARC) + refRows;
+        }
+        if (!r.mode && !tm) notes.push('Aguardando o primeiro registro do datalogger dentro do ensaio.');
+      } else {
+        const T = xf.t.result && xf.t.result.timing;
+        if (mode === 'pulse') {
+          val = r.pulses_total == null ? '—' : Fmt.int(r.pulses_total); unit = 'pulsos'; textual = false; name = `Pulsos brutos no ensaio · Δt efetivo ${r.time_eff_ms == null ? '—' : Trials.dur(r.time_eff_ms)}`;
+          rows = K('Vazão média (N ÷ K ÷ Δt)', fnum(c(q && q.mean)), fu, CALC) + K('Volume (N ÷ K)', Fmt.num(r.volume_l, 3), 'L', CALC) + K('Fator K', r.k_pulses_per_l ? Fmt.sig(r.k_pulses_per_l, 6) : 'não configurado', r.k_pulses_per_l ? 'pulsos/L' : '', ['f', 'configurado']) + refRows;
+        } else {
+          val = fnum(c(q && q.mean)); textual = val === '—'; unit = textual ? '' : fu; name = `Vazão média do ensaio · ${T && T.eff_ms != null ? Trials.dur(T.eff_ms) : tSpan(xf)}`;
+          rows = K('Corrente média', r.ma ? Fmt.num(r.ma.mean, 3) : '—', 'mA') + K('Volume (∫ vazão)', Fmt.num(r.volume_l, 3), 'L', CALC) + refRows;
+        }
+        if (xf.t.state !== 'completed' && xf.t.reason) notes.push(xf.t.reason);
+        notes.push(...(r.issues || []).filter(i => !(xf.t.reason || '').includes(i)));
+      }
+      const tag = tTag(xf); tagEl.hidden = false; tagEl.textContent = tag[0]; tagEl.className = 'tag ' + (tag[1] || '');
+    } else tagEl.hidden = true;
+    Trials.bar('#cor-bar', xf);
+    setBig('#cor-val', val); $('#cor-unit').textContent = unit; $('#cor-name').textContent = name;
+    $('#cor-big').className = 'big' + (textual ? ' txt' : '');
     pill('#p-cor', pst);
+    setHtml($('#cor-rows'), rows);
     setHtml($('#cor-sig'), sig);
-    setHtml($('#cor-note'), note);
-    const x = $('#cor-x');
-    x.hidden = !xc;
-    if (xc) { x.className = 'xcheck' + (xc.warn ? ' warn' : ''); setHtml(x, `<svg class="ic" aria-hidden="true"><use href="#${xc.warn ? 'i-alert' : 'i-info'}"/></svg><span>${xc.html}</span>`); }
+    setHtml($('#cor-note'), (note ? `<span>${note}</span>` : '') + notes.map(t => `<span class="err">${esc(t)}</span>`).join(''));
+    const xel = $('#cor-x');
+    xel.hidden = !xc;
+    if (xc) { xel.className = 'xcheck' + (xc.warn ? ' warn' : ''); setHtml(xel, `<svg class="ic" aria-hidden="true"><use href="#${xc.warn ? 'i-alert' : 'i-info'}"/></svg><span>${xc.html}</span>`); }
+    const done = xf && !xf.run ? xf.t : null, det = $('#cor-det'), key = done ? done.id : null;
+    det.hidden = !done;
+    if (done && key !== S.corDetKey) {
+      const d = { ...cfg, density_g_cm3: done.cfg.density };
+      $('#cor-det-body').innerHTML = Trials.summary(done) + Trials.flowHtml(done.result, d, false) + Trials.pluvHtml(done.result, d, false, 'bal') + Trials.timingHtml(done.result) + Trials.links(done.id);
+    }
+    S.corDetKey = key;
   },
   signal(f) {
     const p = [], c = S.cfg.cor;
@@ -117,11 +169,10 @@ const FlowUI = {
       if (f.clamp) p.push(`<span class="flag">no limite de ${f.clamp === 'low' ? 4 : 20} mA</span>`);
       if (c.q4 != null && c.q20 != null) p.push(`<span>4–20 mA → ${Fmt.sig(c.q4)}–${Fmt.sig(c.q20)} ${esc(c.unit)}</span>`);
     } else {
-      p.push(`<span>${f.pulses == null ? '—' : Fmt.int(f.pulses)} pulsos em ${Fmt.num(f.window_s, 2)} s</span>`);
-      if (f.hz != null) p.push(`<span>= ${Fmt.num(f.hz, 1)} Hz</span>`);
       if (f.window_assumed) p.push('<span class="flag" title="Sem registro anterior contíguo: a janela de contagem foi considerada igual ao Scan nominal de 1 s.">janela presumida</span>');
       const r = flowL(f.resolution_lmin);
-      if (r != null) p.push(`<span>±${Fmt.sig(r, 2)} ${esc(S.cfg.flow_unit)} por pulso</span>`);
+      if (r != null) p.push(`<span>1 pulso = ${Fmt.sig(r, 2)} ${esc(S.cfg.flow_unit)} na janela</span>`);
+      if (S.cfg.flow_k_pulses_per_l != null) p.push(`<span>K = ${Fmt.sig(S.cfg.flow_k_value, 6)} ${esc(S.cfg.flow_k_unit)}</span>`);
     }
     return p.join('');
   },
@@ -129,7 +180,7 @@ const FlowUI = {
     const x = f.crosscheck;
     if (!x) return null;
     if (x.suspect === 'no_pulses')
-      return { warn: true, html: 'A corrente indica vazão, mas nenhum pulso chegou em P2 nas últimas leituras. Confira a ligação da saída digital, a saída de pulsos do MAG 5000 e o fator K.' };
+      return { warn: true, html: 'A corrente indica vazão, mas nenhum pulso chegou em P2 nas últimas leituras. Confira a ligação da saída digital, a saída de pulsos do medidor e o fator K.' };
     const other = f.method === 'pulse' ? 'analog' : 'pulse', o = f.channels && f.channels[other];
     if (!o || o.state !== 'ok' || o.lmin == null) return null;
     const v = flowL(o.lmin);
@@ -251,10 +302,10 @@ const Drawer = {
       if (p && p.hz != null) h += dtdd(`Com este K, os ${n(p.hz, 1)} Hz atuais dão`, `${Fmt.sig(conv(p.hz / kl * 60), 4)} ${esc(fu)}`);
       const a = ch.analog, qa = a && a.state === 'ok' ? a.lmin : null;
       if (qa != null && qa > 0) {
-        const hz = qa / 60 * kl, np = hz * c.trial_duration_s;
+        const durS = (c.trial_duration_ms != null ? c.trial_duration_ms : c.trial_duration_s * 1000) / 1000, hz = qa / 60 * kl, np = hz * durS;
         h += dtdd(`Canal analógico agora (${Fmt.sig(conv(qa), 4)} ${esc(fu)}): pulsos esperados`, `${n(hz, 1)} Hz`, hz > 10000 ? 'warn' : '');
-        h += dtdd(`Pulsos num ensaio de ${c.trial_duration_s} s`, `${Fmt.int(np)} · 1 pulso = ${Fmt.sig(100 / np, 2)} %`, np < 200 ? 'warn' : '');
-        if (hz > 10000) h += dtdd('Atenção', 'acima de 10 kHz, o máximo da saída do MAG 5000', 'warn');
+        h += dtdd(`Pulsos num ensaio de ${Trials.dur(durS * 1000)}`, `${Fmt.int(np)} · 1 pulso = ${Fmt.sig(100 / np, 2)} %`, np < 200 ? 'warn' : '');
+        if (hz > 10000) h += dtdd('Atenção', 'acima de 10 kHz, o máximo usual da saída de pulsos do medidor', 'warn');
       }
     } else if (kv === null) h = dtdd('Fator K', 'não configurado: a vazão por pulsos fica indisponível');
     setHtml($('#fk-derived'), h);

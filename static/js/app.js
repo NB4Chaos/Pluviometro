@@ -28,7 +28,18 @@ const volEq = (mm, area) => mm == null || !area ? null : mm * area / 10;
 const flowEq = (mmh, area) => mmh == null || !area ? null : flowL(mmh * area / 10 / 1000 / 60);
 const DENS_MSG = 'Informe a densidade da água em Configurações.';
 const isStale = () => !S.sock || S.lastRx == null || Date.now() - S.lastRx > STALE_MS;
-const K = (l, v, u, tag) => Trials.kv(l, v, u, tag), PARC = ['p', 'parcial'], REF = ['r', 'ref.'];
+const K = (l, v, u, tag) => Trials.kv(l, v, u, tag), PARC = ['p', 'parcial'], REF = ['r', 'ref.'], CALC = ['c', 'calculado'];
+// valor principal: só reescreve quando muda e marca a troca com uma transição curta (opacidade; nada é reconsultado)
+function setBig(sel, text) {
+  const el = $(sel); if (!el || el.textContent === text) return;
+  el.textContent = text;
+  const big = el.closest('.big'); if (!big || reducedMotion()) return;
+  big.classList.remove('tick'); void big.offsetWidth; big.classList.add('tick');
+}
+// duração do ensaio: guardada em ms; digitada na unidade escolhida pelo operador
+const DU = { ms: 1, s: 1000, min: 60000 };
+const durMsTyped = () => { const v = parseNum($('#bal-dur').value); return v == null || !isFinite(v) ? null : Math.round(v * DU[$('#bal-dur-u').value]); };
+const durShow = (ms, u) => ms == null ? '' : String(Number((ms / DU[u]).toPrecision(12)));   // campo numérico: ponto decimal (o navegador exibe localizado)
 
 function getRange() {
   if (S.range.key === 'custom' && S.range.from && S.range.to) return { from: S.range.from, to: S.range.to };
@@ -62,11 +73,8 @@ function setPills() {
   pill('#p-mass', stale ? 'stale' : s.mass_status); pill('#p-temp', stale ? 'stale' : s.temp_status); pill('#p-tips', stale ? 'stale' : 'ok');
   const c = $('#conn');
   c.className = 'pill ' + (!S.sock ? 'err' : stale ? 'warn' : 'ok');
-  c.lastElementChild.textContent = !S.sock ? 'Servidor desconectado' : stale ? 'Sem dados do datalogger' : 'Recebendo dados';
-  const r = $('#real'), err = l.error;
-  r.className = 'pill ' + (!S.sock ? 'err' : stale ? (err ? 'err' : 'warn') : 'ok');
-  r.lastElementChild.textContent = !S.sock ? 'Servidor desconectado' : stale ? (err ? 'Datalogger sem resposta' : 'Aguardando dados novos') : 'Dados reais do datalogger';
-  r.title = err || '';
+  c.lastElementChild.textContent = !S.sock ? 'Servidor desconectado' : stale ? (l.error ? 'Datalogger sem resposta' : 'Sem dados do datalogger') : 'Recebendo dados';
+  c.title = l.error || '';
   document.body.classList.toggle('stale-data', stale);
   const sk = $('#skew'), k = l.clock_skew_s;
   sk.hidden = !(k != null && Math.abs(k) > 10);
@@ -115,30 +123,34 @@ function renderBal() {
     if (S.vmode === 'flow' && g && g.volume_ml == null) notes.push(...g.issues);
   }
   if (x) {
-    if (x.run) rows = K('Tempo decorrido', Trials.mmss(x.t.elapsed_s)) + K('Tempo restante', `${Trials.mmss(x.t.remaining_s)} de ${Trials.mmss(x.t.duration_cfg_s)}`) + rows;
+    if (x.run) rows = Trials.timeRows(x.t) + rows;
     else if (x.t.state !== 'completed' && x.t.reason) notes.push(x.t.reason);
     if (x.g && !(x.run && x.g.duration_s == null)) notes.push(...(x.g.issues || []).filter(i => !(x.t.reason || '').includes(i)));   // nos primeiros segundos ainda não há 2 leituras: não é falha
   }
-  $('#bal-val').textContent = Fmt.num(val, unit === 'mL' ? 1 : dm); $('#bal-unit').textContent = unit; $('#bal-name').textContent = name;
+  setBig('#bal-val', Fmt.num(val, unit === 'mL' ? 1 : dm)); $('#bal-unit').textContent = unit; $('#bal-name').textContent = name;
   setHtml($('#bal-rows'), rows);
   setHtml($('#bal-notes'), notes.map(t => `<p class="note err">${esc(t)}</p>`).join(''));
   const tag = x ? tTag(x) : ['Sem ensaio', ''], el = $('#bal-state');
   el.textContent = tag[0]; el.className = 'tag ' + (tag[1] || '');
-  $('#bal-bar').hidden = !(x && x.run);
-  if (x && x.run) $('#bal-bar i').style.width = Math.min(100, 100 * x.t.elapsed_s / x.t.duration_cfg_s) + '%';
+  Trials.bar('#bal-bar', x);
   const done = x && !x.run ? x.t : null, det = $('#bal-det'), key = done ? done.id : null;
   det.hidden = !done;
   if (done && key !== S.detKey) {   // só reescreve quando muda: não fecha nem rola o painel aberto
     const d = { ...S.cfg, density_g_cm3: done.cfg.density };
-    $('#bal-det-body').innerHTML = Trials.summary(done) + (done.kind === 'flow' ? Trials.flowHtml(done.result, d, false) : Trials.pluvHtml(done.result, d, false, 'bal'))
-      + `<p class="grp"><a class="btn" href="/relatorio/${done.id}" target="_blank">Relatório (imprimir / PDF)</a><a class="btn" href="/api/trials/${done.id}/raw.csv">Amostras (CSV)</a><a class="btn" href="/api/trials/${done.id}/tips.csv">Basculadas (CSV)</a></p>`;
+    $('#bal-det-body').innerHTML = Trials.summary(done) + (done.kind === 'flow' ? Trials.flowHtml(done.result, d, false) : Trials.pluvHtml(done.result, d, false, 'bal')) + Trials.timingHtml(done.result) + Trials.links(done.id);
   }
   S.detKey = key;
-  const btn = $('#bal-go'), dur = $('#bal-dur');
+  renderTrialCtl(x, done);
+}
+// controles do ensaio (dentro do card principal, seja ele a balança ou o medidor)
+function renderTrialCtl(x, done) {
+  const btn = $('#bal-go'), dur = $('#bal-dur'), u = $('#bal-dur-u');
   btn.textContent = x && x.run ? 'Encerrar ensaio' : done ? 'Voltar ao tempo real' : 'Iniciar ensaio'; btn.classList.toggle('stop', !!(x && x.run));
   btn.dataset.done = done ? done.id : '';
   $('#bal-dur-w').hidden = !!x;
-  if (document.activeElement !== dur && !S.durP) dur.value = S.cfg.trial_duration_s;
+  if (!S.durP && document.activeElement !== dur && document.activeElement !== u) { u.value = S.cfg.trial_duration_unit || 's'; dur.value = durShow(S.cfg.trial_duration_ms, u.value); }
+  const lock = !!(Trials.st.running);   // o método de ensaio fica fixo enquanto um ensaio roda
+  $$('#meth .seg button').forEach(b => { b.disabled = lock && b.dataset.m !== S.method; b.title = b.disabled ? 'O método fica fixo durante o ensaio.' : ''; });
 }
 
 // ---------- card do pluviômetro: período selecionado, ou o ensaio (mesmo intervalo da balança) ----------
@@ -164,7 +176,7 @@ function renderPluv() {
       rows = K('Basculadas', p.tips) + K('Intensidade média', Fmt.num(p.intensity_mm_h, 2), 'mm/h', part && p.intensity_mm_h != null ? PARC : ''); }
     if (!res) note = 'Informe a resolução do pluviômetro em Configurações.';
   }
-  $('#pl-val').textContent = Fmt.num(val, unit === 'mL' ? 1 : rd); $('#pl-unit').textContent = unit; $('#pl-name').textContent = name;
+  setBig('#pl-val', Fmt.num(val, unit === 'mL' ? 1 : rd)); $('#pl-unit').textContent = unit; $('#pl-name').textContent = name;
   $('#pl-tag').hidden = !part || val == null;
   const el = $('#pl-state'); el.hidden = !tag; if (tag) { el.textContent = tag[0]; el.className = 'tag ' + (tag[1] || ''); }
   setHtml($('#pl-rows'), rows);
@@ -295,23 +307,23 @@ async function loadHistory() {
 async function loadTrials() { Trials.st = await Api.get('/api/trials'); renderBal(); renderPluv(); renderTrialHistory(); }
 function renderTrialHistory() {
   const h = Trials.st.history || [];
-  $('#tr-hist').innerHTML = h.map(t => { const [lab, cls] = Trials.STATE[t.state] || [t.state, '']; return `<tr><td>${Fmt.dt(t.start_ts)}</td><td>${Trials.KIND[t.kind] || t.kind}</td><td class="${cls}">${lab}</td><td>${Trials.mmss((t.end_ts - t.start_ts) / 1000)} de ${Trials.mmss(t.duration_cfg_s)}</td><td>${esc(t.reason || '')}</td><td><button class="btn" data-id="${t.id}">Ver</button></td></tr>`; }).join('')
+  $('#tr-hist').innerHTML = h.map(t => { const [lab, cls] = Trials.STATE[t.state] || [t.state, '']; return `<tr><td>${Fmt.dt(t.start_ts)}</td><td>${Trials.KIND[t.kind] || t.kind}</td><td class="${cls}">${lab}</td><td>${Trials.dur(t.end_ts - t.start_ts)} de ${Trials.dur(t.duration_cfg_ms != null ? t.duration_cfg_ms : t.duration_cfg_s * 1000)}</td><td>${esc(t.reason || '')}</td><td><button class="btn" data-id="${t.id}">Ver</button></td></tr>`; }).join('')
     || '<tr><td colspan="6" class="lbl">Nenhum ensaio realizado.</td></tr>';
   $$('#tr-hist button').forEach(b => b.onclick = async () => {
     const t = await Api.get('/api/trials/' + b.dataset.id), el = $('#tr-detail'); el.hidden = false;
-    el.innerHTML = Trials.detail(t, S.cfg) + `<p class="grp"><a class="btn" href="/relatorio/${t.id}" target="_blank">Relatório (imprimir / PDF)</a><a class="btn" href="/api/trials/${t.id}/raw.csv">Amostras (CSV)</a><a class="btn" href="/api/trials/${t.id}/tips.csv">Basculadas (CSV)</a></p>`;
+    el.innerHTML = Trials.detail(t, S.cfg) + Trials.links(t.id);
     $('#tr-close').onclick = () => { el.hidden = true; };
   });
 }
 async function trialToggle() {
   const run = Trials.st.running, msg = $('#bal-msg'), done = $('#bal-go').dataset.done;
   msg.textContent = '';
-  if (!run && done) { S.seen = done; store.set('elus.seen', done); renderBal(); renderPluv(); return; }   // fecha o resultado: o ensaio continua no Histórico
+  if (!run && done) { S.seen = done; store.set('elus.seen', done); S.corDetKey = null; renderBal(); renderPluv(); FlowUI.renderCard(); return; }   // fecha o resultado: o ensaio continua no Histórico
   try {
     if (run) { if (!confirm('Encerrar o ensaio agora? Ele ficará registrado como interrompido.')) return; await Api.post('/api/trials/stop'); }
     else {
       if (S.durP && !(await S.durP)) return;   // duração digitada: espera o salvamento terminar antes de iniciar
-      if (Number($('#bal-dur').value) !== S.cfg.trial_duration_s && !(await saveDuration())) return;
+      if (durMsTyped() !== S.cfg.trial_duration_ms && !(await saveDuration())) return;
       await Api.post('/api/trials/start', { kind: S.method === 'comp' ? 'flow' : 'pluv' });
     }
     await loadTrials();
@@ -320,14 +332,17 @@ async function trialToggle() {
 
 // ---------- configurações (atualização parcial: só os campos deste formulário vão ao servidor) ----------
 const num = s => { s = String(s).trim().replace(',', '.'); return s === '' ? null : Number(s); };
-async function saveDuration() {
-  const el = $('#bal-dur'), v = Number(el.value), msg = $('#bal-msg');
-  if (!Number.isInteger(v) || v < 10 || v > 21600) { msg.textContent = 'Duração: use um número inteiro de 10 a 21600 s.'; el.value = S.cfg.trial_duration_s; return false; }
-  try { S.cfg = await Api.post('/api/config', { trial_duration_s: v }); msg.textContent = ''; return true; }
-  catch (e) { msg.textContent = 'Não foi possível salvar a duração: ' + e.message; el.value = S.cfg.trial_duration_s; return false; }
+// Duração do ensaio: o valor vai ao servidor em ms (inteiro), com a unidade escolhida; o mínimo é um Scan do datalogger.
+async function saveDuration(unitOnly) {
+  const el = $('#bal-dur'), u = $('#bal-dur-u').value, msg = $('#bal-msg'), ms = unitOnly ? S.cfg.trial_duration_ms : durMsTyped(), min = S.cfg.duration_min_ms || S.cfg.scan_ms || 1000;
+  const back = () => { el.value = durShow(S.cfg.trial_duration_ms, u); };
+  if (!unitOnly && (ms == null || ms < min || ms > 6 * 3600 * 1000)) { msg.textContent = `Duração: de ${Trials.dur(min)} (um Scan do datalogger) a 6 h.`; back(); return false; }
+  try { S.cfg = await Api.post('/api/config', { trial_duration_ms: ms, trial_duration_unit: u }); msg.textContent = ''; back(); return true; }
+  catch (e) { msg.textContent = 'Não foi possível salvar a duração: ' + e.message; back(); return false; }
 }
 function fillConfig() {
   const c = S.cfg, f = v => v == null ? '' : String(v).replace('.', ',');
+  $('#cf-vmode').value = S.vmode;
   $('#cf-unit').value = c.mass_unit; $('#cf-tunit').value = c.temp_unit; $('#cf-funit').value = c.flow_unit;
   $('#cf-md').value = c.mass_decimals; $('#cf-td').value = c.temp_decimals; $('#cf-fd').value = c.flow_decimals;
   $('#cf-res').value = f(c.tip_resolution_mm); $('#cf-dens').value = f(c.density_g_cm3); $('#cf-area').value = f(c.catch_area_cm2);
@@ -340,6 +355,7 @@ async function saveConfig() {
     S.cfg = await Api.post('/api/config', { mass_unit: $('#cf-unit').value, temp_unit: $('#cf-tunit').value, flow_unit: $('#cf-funit').value,
       mass_decimals: $('#cf-md').value, temp_decimals: $('#cf-td').value, flow_decimals: $('#cf-fd').value,
       tip_resolution_mm: $('#cf-res').value, density_g_cm3: $('#cf-dens').value, catch_area_cm2: $('#cf-area').value, default_range_s: $('#cf-range').value });
+    S.vmode = $('#cf-vmode').value === 'flow' ? 'flow' : 'precip'; store.set('elus.vmode', S.vmode);   // preferência desta tela (não vai ao servidor)
     $('#cf-msg').textContent = 'Configurações salvas. Ensaios em andamento e já concluídos não mudam.';
     onConfigChanged();
   } catch (e) { $('#cf-msg').textContent = 'Não foi possível salvar: ' + e.message; }
@@ -352,17 +368,19 @@ function onConfigChanged() {
 }
 
 // ---------- método, visualização, período e navegação ----------
+// Card principal (azul) conforme o método: gravimétrico = balança; comparativo = medidor de vazão, com o pluviômetro ao lado e a balança oculta
+// (a referência da balança aparece dentro do card do medidor). Só classes e a posição dos controles mudam: nada é reconsultado.
 function applyMethod() {
-  const comp = S.method === 'comp';
+  const comp = S.method === 'comp', was = document.body.dataset.method, hero = comp ? $('#c-cor') : $('#c-mass');
   document.body.dataset.method = comp ? 'comp' : 'grav';
   $$('#meth .seg button').forEach(b => { const on = b.dataset.m === S.method; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
-  $('#c-cor').hidden = $('#g-cor').hidden = !comp;
+  $('#c-cor').hidden = $('#g-cor').hidden = !comp; $('#c-mass').hidden = comp;
+  $('#c-cor').classList.toggle('hero', comp); $('#c-mass').classList.toggle('hero', !comp);
+  if ($('#trial-ctl').parentElement !== hero) hero.appendChild($('#trial-ctl'));
+  if (was && was !== document.body.dataset.method && !reducedMotion()) { hero.classList.remove('swap'); void hero.offsetWidth; hero.classList.add('swap'); $('#c-pluv').classList.add('swap'); setTimeout(() => $$('.card.swap').forEach(c => c.classList.remove('swap')), 400); }
   renderBal(); FlowUI.renderMethod(); FlowUI.renderCard();
+  requestAnimationFrame(() => FlowUI.thumb());
   Object.values(Charts.c).forEach(c => c.resize());
-}
-function applyVmode() {
-  $$('#vm .seg button').forEach(b => { const on = b.dataset.x === S.vmode; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
-  renderBal(); renderPluv();
 }
 function setChips() {
   $$('.chip').forEach(b => { const on = b.dataset.r === S.range.key; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
@@ -375,14 +393,13 @@ function route() {
   const v = view();
   $$('.view').forEach(e => { e.hidden = e.id !== 'v-' + v; });
   $$('.nav button').forEach(b => { const on = b.dataset.v === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-  $('#title').textContent = TITLES[v]; $('#ctrl').hidden = v === 'config'; $('#meth').hidden = $('#vm').hidden = v === 'historico';
+  $('#title').textContent = TITLES[v]; $('#ctrl').hidden = v === 'config'; $('#meth').hidden = v === 'historico';
   refreshAll();
   if (v === 'dashboard') requestAnimationFrame(() => FlowUI.thumb());
 }
 
 $$('.nav button').forEach(b => b.onclick = () => go(b.dataset.v));
-$$('#meth .seg button').forEach(b => b.onclick = () => { S.method = b.dataset.m; store.set('elus.method', S.method); applyMethod(); if (view() === 'graficos') refreshCharts(); });
-$$('#vm .seg button').forEach(b => b.onclick = () => { S.vmode = b.dataset.x; store.set('elus.vmode', S.vmode); applyVmode(); if (view() === 'graficos') refreshCharts(); });
+$$('#meth .seg button').forEach(b => b.onclick = () => { if (b.dataset.m === S.method) return; S.method = b.dataset.m; store.set('elus.method', S.method); applyMethod(); if (view() === 'graficos') refreshCharts(); });
 $$('.chip').forEach(b => b.onclick = () => b.dataset.r === 'custom' ? setRange({ key: 'custom', from: Date.now() - 9e5, to: Date.now() }) : setRange({ key: b.dataset.r }));
 $('#c-apply').onclick = () => { const f = new Date($('#c-from').value).getTime(), t = new Date($('#c-to').value).getTime(); if (f < t) setRange({ key: 'custom', from: f, to: t }); };
 $('#f-sensor').onchange = $('#f-state').onchange = () => { S.page = 0; loadHistory(); };
@@ -390,11 +407,12 @@ $('#h-prev').onclick = () => { S.page--; loadHistory(); }; $('#h-next').onclick 
 $('#cf-save').onclick = saveConfig;
 $('#bal-go').onclick = trialToggle;
 $('#bal-dur').onchange = () => { S.durP = saveDuration().finally(() => { S.durP = null; }); };
+$('#bal-dur-u').onchange = () => { S.durP = saveDuration(true).finally(() => { S.durP = null; }); };   // troca de unidade: o valor é convertido, não alterado
 $('#reset').onclick = async () => { if (confirm('Zerar a contagem de basculadas? O histórico de medições e os ensaios são mantidos.')) { try { await Api.post('/api/reset-count'); } catch (e) { alert('Não foi possível zerar: ' + e.message); return; } S.events = []; S.evIds = new Set(); S.lastTotal = null; drawEvents(); refreshSummary(); } };
 // medidor de vazão: seletor do método e acessos ao painel de parâmetros
 $$('#flow-method button').forEach(b => b.onclick = () => FlowUI.request(b.dataset.method));
 const openFlow = (e, tab) => Drawer.open(tab || (FlowUI.st && FlowUI.st.requested === 'analog' ? 'analog' : 'pulse'), e.currentTarget);
-$('#flow-params').onclick = e => openFlow(e); $('#flow-gear').onclick = e => openFlow(e); $('#cf-flow-open').onclick = e => openFlow(e);
+$('#flow-gear').onclick = e => openFlow(e); $('#cf-flow-open').onclick = e => openFlow(e);
 $('#cor-note').addEventListener('click', e => { const b = e.target.closest('[data-open-flow]'); if (b) Drawer.open(b.dataset.openFlow, b); });
 Drawer.bind();
 window.addEventListener('hashchange', () => { try { const h = location.hash.slice(1); if (h in TITLES && h !== current) { current = h; route(); } } catch (e) {} });
@@ -404,11 +422,11 @@ window.addEventListener('hashchange', () => { try { const h = location.hash.slic
   FlowUI.st = await Api.get('/api/flow').catch(() => null);
   fillConfig();
   S.range = { key: Object.keys(RANGES).find(k => RANGES[k] === S.cfg.default_range_s) || '15m' };
-  setChips(); applyMethod(); applyVmode();
+  setChips(); applyMethod();
   Api.connect({
     sample: onSample,
     conn: ok => { S.sock = ok; setPills(); if (ok) { loadTrials().catch(() => {}); loadEvents().catch(() => {}); Api.get('/api/flow').then(st => FlowUI.setStatus(st)).catch(() => {}); } },   // reconectou: ressincroniza
-    trial: t => { const was = Trials.st.running; Trials.st = { ...Trials.st, running: t.running, last: t.last }; renderBal(); renderPluv(); if (was && !t.running) loadTrials(); },
+    trial: t => { const was = Trials.st.running; Trials.st = { ...Trials.st, running: t.running, last: t.last }; renderBal(); renderPluv(); FlowUI.renderCard(); if (was && !t.running) loadTrials(); },
     flow: st => FlowUI.setStatus(st),
     config: c => { if (JSON.stringify(c) !== JSON.stringify(S.cfg) && (!Drawer.isOpen() || !Drawer.dirty())) { S.cfg = c; onConfigChanged(); } },   // não atropela um formulário sendo editado
   });

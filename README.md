@@ -13,7 +13,8 @@ CR1000Xe ──(HTTP/HTTPS, conta somente leitura)── app.py ──(Socket.IO
 Documentação: `docs/DIAGNOSTICO.md` (problemas, alterações, desempenho), `docs/CALCULOS_E_ENSAIOS.md` (fórmulas, ensaios, interface),
 `docs/CRBASIC_VAZAO.md` (programa novo, ligações), `docs/DEBUG.md` (onde mexer), `docs/TESTES.md` (o que foi e o que não foi testado),
 `docs/MAPA_VARIAVEIS.md`, `docs/CHECKLIST.md` (validação no equipamento), `docs/PESQUISA.md` (arquitetura e fontes),
-`docs/DESEMPENHO_BACKEND.md` (otimização do backend: antes × depois).
+`docs/DESEMPENHO_BACKEND.md` (otimização do backend: antes × depois), `docs/DIAGNOSTICO_2026-10-31.md` e `docs/ENTREGA_2026-10-31.md`
+(refinamento sobre o pacote do TI: tipografia original, pulsos brutos como valor principal, card principal dinâmico, duração em ms, temporização).
 
 ## Instalação e execução (Windows)
 
@@ -112,4 +113,4 @@ python tests\e2e_cr1000x_elus_calib.py
 
 Usam emuladores com dados fictícios e pasta de dados temporária (não tocam nos seus dados). O emulador reproduz os esquemas reais da
 tabela `Vazao1s` (v3 e v4) e o comportamento da API que causava as falsas "tabelas reiniciadas". **Nenhum teste foi feito contra um
-CR1000Xe real.** Resultado da última execução: `docs/ENTREGA_2026-10-28.md`.
+CR1000Xe real.** Resultado da última execução: `docs/ENTREGA_2026-10-31.md` (fase anterior: `docs/ENTREGA_2026-10-28.md`).

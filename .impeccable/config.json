@@ -1,0 +1,44 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "em-dash-overuse",
+        "value": "*",
+        "files": [
+          "templates/index.html"
+        ],
+        "createdAt": "2026-10-30T11:53:39.053Z",
+        "reason": "Claude: the em dash is the missing-value placeholder in every numeric field, not prose"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          "templates/index.html"
+        ],
+        "createdAt": "2026-10-30T11:53:50.750Z",
+        "reason": "Claude: method selector buttons render on the yellow animated thumb (#FFC20E, ~9:1); the detector measured the translucent container background"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "templates/index.html"
+        ],
+        "createdAt": "2026-10-30T11:53:50.764Z",
+        "reason": "Claude: tab strip from the TI package; the ink bar deliberately sits on the border-bottom"
+      },
+      {
+        "rule": "pulsing-dot",
+        "value": "*",
+        "files": [
+          "templates/index.html"
+        ],
+        "createdAt": "2026-10-30T11:53:50.779Z",
+        "reason": "Claude: 'ao vivo' dot is tied to live Socket.IO samples and stops (body.stale-data) when data ages"
+      }
+    ]
+  }
+}
