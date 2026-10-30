@@ -1,0 +1,442 @@
+'==================================================================
+' AQUISICAO DE CALIBRACAO - CR1000Xe
+' Balanca MK30K1 + Termopar tipo T + Pluviometro de contato seco
+' + Medidor de vazao SITRANS FM MAG 5000: 4-20 mA (RG1) e PULSOS (P2)
+'
+' v4 (29/10/2026): derivado do Pluviometria_v3_com_vazao_4-20mA.CR1X EM USO.
+'   Balanca, termopar, pluviometro e o 4-20 mA em RG1 sao IDENTICOS ao v3.
+'   Acrescimos: um unico PulseCount em P2 (alta frequencia, pull-up) com a
+'   CONTAGEM BRUTA por Scan (Flow_Pulsos), o acumulado desde o inicio do
+'   programa (Flow_PulsosTot) e o estado do canal (Flow_PStatus).
+'   Correcao: Flow_mA = NAN agora sai com Flow_Status = 3 (sem leitura);
+'   no v3 saia com Flow_Status = 0.
+'   Os 4 primeiros campos de Vazao1s sao os mesmos do v3: o servidor com o
+'   perfil programa_vazao le os dois programas (campos de pulso opcionais).
+'   *** NAO COMPILADO: nao havia CRBasic Editor nesta maquina. Compile,
+'   *** leia os avisos e confira os nomes dos campos com
+'   *** tools/probe_cr1000x.py antes de confiar nos dados.
+'
+' BALANCA:
+'   ComC5 / C5-C6
+'   TX balanca -> C6 (RX datalogger)
+'   RX balanca -> C5 (TX datalogger)
+'   GND -> G
+'
+' TERMOPAR:
+'   Tipo T, canal diferencial 1H/1L
+'   1H = positivo; 1L = negativo
+'
+' PLUVIOMETRO:
+'   Contato seco entre P1 e G
+'   PConfig = 1 (Switch Closure with pull-up)
+'   Resolucao configurada: 0,2 mm/basculada
+'   Confirmar a resolucao real do sensor.
+'
+' MEDIDOR DE VAZAO 4-20 mA (igual ao v3):
+'   Leitura pela entrada de corrente nativa RG1 usando CurrentSE().
+'   Flow_mA = corrente medida em mA.
+'   Flow_mV = valor derivado (Flow_mA x 10), apenas para compatibilidade.
+'   Flow_Status: 0 = 4 a 20 mA; 1 = abaixo de 4 mA; 2 = acima de 20 mA;
+'                3 = sem leitura (NAN).
+'   A conversao para vazao/unidade de engenharia ocorre no servidor Python.
+'
+' MEDIDOR DE VAZAO - PULSOS (novo):
+'   Saida digital do MAG 5000 em P2. ATENCAO (datasheet Siemens FI 01 e
+'   especificacoes do CR1000X):
+'     - a saida ATIVA do MAG 5000 e de 24 V DC / 30 mA: NAO LIGAR em P2,
+'       que aceita no maximo +-20 V DC;
+'     - usar a saida PASSIVA (3-30 V DC, carga 200 ohm a 10 kohm) com
+'       resistor de pull-up externo (o pull-up interno de P2 e de 100 kohm,
+'       fora da faixa de carga do Siemens). Valor do resistor, terminais
+'       (56/57/58) e polaridade: CONFIRMAR no manual de operacao e na
+'       etiqueta da unidade. Nada aqui foi validado na bancada.
+'     - frequencia maxima do MAG 5000: 10 kHz (50 % de ciclo). P2 em alta
+'       frequencia aceita 250 kHz; contador de 24 bits (16.777.216/Scan).
+'   PulseCount(Flow_Pulsos,1,P2,3,0,1,0): PConfig 3 = alta frequencia com
+'   pull-up; POption 0 = CONTAGEM no Scan (nao frequencia). Executa em TODO
+'   Scan (a documentacao proibe PulseCount dentro de If/Sub/SlowSequence).
+'   Flow_Pulsos    = pulsos contados no Scan (bruto; 0 e valido)
+'   Flow_PulsosTot = soma das contagens validas desde o inicio do programa
+'                    (reinicia com o programa; o servidor usa a DIFERENCA
+'                    entre o fim e o inicio do ensaio e detecta o reinicio)
+'   Flow_PStatus   = 0 valido | 1 primeiro Scan (porta ainda sem intervalo
+'                    de contagem) | 2 saturado (>= 16777216) | 3 acima de
+'                    12 kHz (acima do que o MAG 5000 gera: sinal suspeito)
+'                    | 4 sem leitura (NAN)
+'   Flow_mode e mantido em 2 por compatibilidade com o perfil anterior; o
+'   METODO (analogico ou pulsos) e escolhido no servidor, que recebe os
+'   dois canais em todo Scan. Nada e escrito no datalogger.
+'
+' IMPORTANTE:
+'   Sem dados simulados.
+'   Falhas de leitura da balanca nao reutilizam valores anteriores.
+'   Total do pluviometro reinicia quando o programa reinicia.
+'   Vaisala removida deste programa.
+'==================================================================
+
+Const SerFmtBal = 3
+
+Const PesoMin = -100
+Const PesoMax = 31000
+Const MsgLenMin = 8
+
+Const Pluvio_mmPorBasculada = 0.2
+
+' Faixa nominal da saida analogica do medidor de vazao
+Const Flow_Min_mA = 4.0
+Const Flow_Max_mA = 20.0
+
+' Pulsos: intervalo do Scan (s) e limite de plausibilidade (Hz)
+Const ScanSeg = 1
+Const Flow_PMaxHz = 12000
+
+'-------------------------
+' Variaveis da balanca
+'-------------------------
+Public Peso_g As Float
+Public StatusBal As Long
+Public LinhaNova As Boolean
+Public LastLine As String * 60
+Public RxLine As String * 60
+Public NumLido(3) As Float
+Public FatorG As Float
+Public BaudSel As Long
+Public BaudInUse As Long
+Public NBuf As Long
+Public NBufIni As Long
+Public TotalOK As Long
+Public TotalFalha As Long
+Public FalhasSeguidas As Long
+Public Alarm_Balanca As Boolean
+
+'-------------------------
+' Variaveis do termopar
+'-------------------------
+Public PTemp_C As Float
+Public TempAgua_C As Float
+
+'-------------------------
+' Variaveis do pluviometro
+'-------------------------
+Public Pluvio_Basculadas_1s As Float
+Public Pluvio_Total As Float
+Public Pluvio_Chuva_mm As Float
+
+'-------------------------
+' Variaveis do medidor de vazao 4-20 mA
+'-------------------------
+Public Flow_mA As Float
+Public Flow_mV As Float
+Public Flow_Status As Long
+Public Flow_mode As Long
+
+'-------------------------
+' Variaveis do medidor de vazao - pulsos (P2)
+'-------------------------
+Public Flow_Pulsos As Float
+Public Flow_PulsosTot As Long
+Public Flow_PStatus As Long
+
+'-------------------------
+' Variaveis internas
+'-------------------------
+Dim BytesVistos As Boolean
+Dim TemDigito As Boolean
+Dim Flow_Primeira As Boolean
+Dim i As Long
+Dim k As Long
+Dim b As Long
+
+'==================================================================
+' TABELA DA BALANCA
+'==================================================================
+DataTable(Balanca1s,True,20000)
+  Sample(1,Peso_g,IEEE4)
+  Sample(1,StatusBal,Long)
+  Sample(1,LinhaNova,Boolean)
+  Sample(1,BaudInUse,Long)
+  Sample(1,LastLine,String)
+EndTable
+
+'==================================================================
+' RESUMO DA BALANCA
+'==================================================================
+DataTable(Resumo,True,1440)
+  DataInterval(0,1,Min,10)
+  Sample(1,TotalOK,Long)
+  Sample(1,TotalFalha,Long)
+  Sample(1,FalhasSeguidas,Long)
+EndTable
+
+'==================================================================
+' TABELA DO TERMOPAR
+'==================================================================
+DataTable(Termopar1s,True,20000)
+  Sample(1,TempAgua_C,IEEE4)
+  Sample(1,PTemp_C,IEEE4)
+EndTable
+
+'==================================================================
+' TABELA DO PLUVIOMETRO
+'==================================================================
+DataTable(Pluviometro1s,True,20000)
+  DataInterval(0,1,Sec,10)
+  Sample(1,Pluvio_Basculadas_1s,IEEE4)
+  Sample(1,Pluvio_Total,IEEE4)
+  Sample(1,Pluvio_Chuva_mm,IEEE4)
+EndTable
+
+'==================================================================
+' TABELA DO MEDIDOR DE VAZAO: 4-20 mA (campos do v3) + PULSOS (v4)
+'==================================================================
+DataTable(Vazao1s,True,20000)
+  DataInterval(0,1,Sec,10)
+  Sample(1,Flow_mV,IEEE4)
+  Sample(1,Flow_mA,IEEE4)
+  Sample(1,Flow_Status,Long)
+  Sample(1,Flow_mode,Long)
+  Sample(1,Flow_Pulsos,IEEE4)
+  Sample(1,Flow_PulsosTot,Long)
+  Sample(1,Flow_PStatus,Long)
+EndTable
+
+'==================================================================
+' PROGRAMA PRINCIPAL
+'==================================================================
+BeginProg
+
+  '--------------------------------------------------------------
+  ' Configuracao da balanca
+  '--------------------------------------------------------------
+  BaudSel = 9600
+  FatorG = 1
+  BaudInUse = BaudSel
+
+  SerialOpen(ComC5,BaudSel,SerFmtBal,0,1000,0)
+  SerialFlush(ComC5)
+
+  '--------------------------------------------------------------
+  ' Inicializacao das variaveis
+  '--------------------------------------------------------------
+  Peso_g = NAN
+  TempAgua_C = NAN
+  PTemp_C = NAN
+  Flow_mA = NAN
+  Flow_mV = NAN
+  Flow_Status = 3
+  Flow_mode = 2
+
+  Flow_Pulsos = NAN
+  Flow_PulsosTot = 0
+  Flow_PStatus = 1
+  Flow_Primeira = True
+
+  Pluvio_Basculadas_1s = 0
+  Pluvio_Total = 0
+  Pluvio_Chuva_mm = 0
+
+  TotalOK = 0
+  TotalFalha = 0
+  FalhasSeguidas = 0
+  Alarm_Balanca = False
+
+  Scan(1,Sec,0,0)
+
+    '============================================================
+    ' TERMOPAR T - CANAL DIFERENCIAL 1
+    '============================================================
+    PanelTemp(PTemp_C,4000)
+
+    TCDiff(TempAgua_C,1,mV200C,1,TypeT,PTemp_C,True,0,60,1,0)
+
+    '============================================================
+    ' MEDIDOR DE VAZAO - SAIDA DE CORRENTE 4-20 mA EM RG1 (igual ao v3)
+    ' CurrentSE retorna a corrente diretamente em mA.
+    '============================================================
+    Flow_mode = 2
+    CurrentSE(Flow_mA,1,mV200,RG1,True,0,60,1,0)
+    Flow_mV = Flow_mA * 10
+
+    If Flow_mA = NAN Then
+      Flow_Status = 3
+    ElseIf Flow_mA < Flow_Min_mA Then
+      Flow_Status = 1
+    ElseIf Flow_mA > Flow_Max_mA Then
+      Flow_Status = 2
+    Else
+      Flow_Status = 0
+    EndIf
+
+    '============================================================
+    ' MEDIDOR DE VAZAO - PULSOS EM P2 (novo)
+    ' Contagem BRUTA no Scan; PulseCount roda em todo Scan.
+    '============================================================
+    PulseCount(Flow_Pulsos,1,P2,3,0,1,0)
+
+    If Flow_Primeira = True Then
+      Flow_PStatus = 1
+      Flow_Pulsos = NAN
+      Flow_Primeira = False
+    ElseIf Flow_Pulsos = NAN Then
+      Flow_PStatus = 4
+    ElseIf Flow_Pulsos >= 16777216 Then
+      Flow_PStatus = 2
+      Flow_Pulsos = NAN
+    ElseIf Flow_Pulsos > Flow_PMaxHz * ScanSeg Then
+      Flow_PStatus = 3
+      Flow_Pulsos = NAN
+    Else
+      Flow_PStatus = 0
+      Flow_PulsosTot = Flow_PulsosTot + Flow_Pulsos
+      If Flow_PulsosTot > 2000000000 Then
+        Flow_PulsosTot = 0
+      EndIf
+    EndIf
+
+    '============================================================
+    ' PLUVIOMETRO - CONTATO SECO P1/G
+    '============================================================
+    PulseCount(Pluvio_Basculadas_1s,1,P1,1,0,1,0)
+
+    Pluvio_Total = Pluvio_Total + Pluvio_Basculadas_1s
+
+    Pluvio_Chuva_mm = Pluvio_Total * Pluvio_mmPorBasculada
+
+    '============================================================
+    ' BALANCA - AQUISICAO SERIAL
+    '============================================================
+    LinhaNova = False
+    BytesVistos = False
+    Peso_g = NAN
+    LastLine = ""
+    StatusBal = 1
+
+    If BaudSel <> BaudInUse Then
+
+      If BaudSel = 1200 OR BaudSel = 2400 OR BaudSel = 4800 OR BaudSel = 9600 OR BaudSel = 19200 OR BaudSel = 38400 OR BaudSel = 57600 OR BaudSel = 115200 Then
+
+        SerialClose(ComC5)
+        SerialOpen(ComC5,BaudSel,SerFmtBal,0,1000,0)
+        SerialFlush(ComC5)
+        BaudInUse = BaudSel
+
+      Else
+        BaudSel = BaudInUse
+      EndIf
+
+    EndIf
+
+    NBufIni = SerialInChk(ComC5)
+
+    For k = 1 To 100
+
+      NBuf = SerialInChk(ComC5)
+
+      If NBuf = 0 Then
+        ExitFor
+      EndIf
+
+      BytesVistos = True
+      RxLine = ""
+
+      SerialIn(RxLine,ComC5,10,CHR(10),60)
+
+      If Right(RxLine,1) = CHR(10) Then
+        LastLine = RxLine
+        LinhaNova = True
+      EndIf
+
+    Next k
+
+    If BytesVistos = False Then
+
+      StatusBal = 1
+
+    ElseIf LinhaNova = False Then
+
+      StatusBal = 2
+
+    Else
+
+      TemDigito = False
+
+      For i = 1 To Len(LastLine)
+
+        b = ASCII(Mid(LastLine,i,1))
+
+        If b >= 48 AND b <= 57 Then
+          TemDigito = True
+        EndIf
+
+      Next i
+
+      If Len(LastLine) < MsgLenMin OR TemDigito = False Then
+
+        StatusBal = 3
+
+      Else
+
+        NumLido(1) = NAN
+        NumLido(2) = NAN
+        NumLido(3) = NAN
+
+        ' Extracao experimental: validar com mensagem real
+        ' da MK30K1.
+        SplitStr(NumLido(1),LastLine,"",3,0)
+
+        ' A MK30K1 envia o sinal separado do numero por espacos ("-   4.5g"):
+        ' SplitStr devolve 4.5 sem o sinal. O sinal e lido do 1o caractere.
+        If Left(LastLine,1) = "-" Then
+          Peso_g = -1 * ABS(NumLido(1)) * FatorG
+        Else
+          Peso_g = NumLido(1) * FatorG
+        EndIf
+
+        If Peso_g = NAN Then
+
+          StatusBal = 3
+
+        ElseIf Peso_g < PesoMin OR Peso_g > PesoMax Then
+
+          Peso_g = NAN
+          StatusBal = 4
+
+        Else
+
+          StatusBal = 0
+
+        EndIf
+
+      EndIf
+
+    EndIf
+
+    If StatusBal = 0 Then
+
+      TotalOK = TotalOK + 1
+      FalhasSeguidas = 0
+      Alarm_Balanca = False
+
+    Else
+
+      TotalFalha = TotalFalha + 1
+      FalhasSeguidas = FalhasSeguidas + 1
+
+      If FalhasSeguidas > 5 Then
+        Alarm_Balanca = True
+      EndIf
+
+    EndIf
+
+    '============================================================
+    ' REGISTRO DOS DADOS
+    '============================================================
+    CallTable Balanca1s
+    CallTable Resumo
+    CallTable Termopar1s
+    CallTable Pluviometro1s
+    CallTable Vazao1s
+
+  NextScan
+
+EndProg

@@ -1,0 +1,8 @@
+{
+  "nome": "elus_calib",
+  "descricao": "Modelo ELUS_CALIB.CR1X: tabelas Medidas e Basculadas, com Coriolis 4-20 mA",
+  "mass": {"table": "Medidas", "value": "Mass_g", "raw": "BalRaw", "nbytes": "NBytesBal"},
+  "temp": {"table": "Medidas", "value": "Temp_C"},
+  "tips": {"table": "Basculadas", "count": "TipsInScan", "sparse": true},
+  "cor": {"table": "Medidas", "ma": "Cor_mA", "status": "Cor_Status", "status_bad": [3]}
+}

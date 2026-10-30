@@ -1,0 +1,12 @@
+{
+  "name": "Monitor de calibração de pluviômetros · Elus",
+  "short_name": "Elus Pluviômetro",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#2F4273",
+  "theme_color": "#071E40",
+  "icons": [
+    { "src": "/static/img/icone-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/img/icone-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

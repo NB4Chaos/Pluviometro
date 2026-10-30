@@ -1,0 +1,288 @@
+'==================================================================
+' AQUISICAO DE CALIBRACAO - CR1000Xe
+' Balanca MK30K1 + Termopar tipo T + Pluviometro de contato seco
+'
+' BALANCA:
+'   ComC5 / C5-C6
+'   TX balanca -> C6 (RX datalogger)
+'   RX balanca -> C5 (TX datalogger)
+'   GND -> G
+'
+' TERMOPAR:
+'   Tipo T, canal diferencial 1H/1L
+'   1H = positivo; 1L = negativo
+'
+' PLUVIOMETRO:
+'   Contato seco entre P1 e G
+'   PConfig = 1 (Switch Closure with pull-up)
+'   Resolucao configurada: 0,2 mm/basculada
+'   Confirmar a resolucao real do sensor.
+'
+' IMPORTANTE:
+'   Sem dados simulados.
+'   Falhas de leitura da balanca nao reutilizam valores anteriores.
+'   Total do pluviometro reinicia quando o programa reinicia.
+'   Vaisala removida deste programa.
+'==================================================================
+
+Const SerFmtBal = 3
+
+Const PesoMin = -100
+Const PesoMax = 31000
+Const MsgLenMin = 8
+
+Const Pluvio_mmPorBasculada = 0.2
+
+'-------------------------
+' Variaveis da balanca
+'-------------------------
+Public Peso_g As Float
+Public StatusBal As Long
+Public LinhaNova As Boolean
+Public LastLine As String * 60
+Public RxLine As String * 60
+Public NumLido(3) As Float
+Public FatorG As Float
+Public BaudSel As Long
+Public BaudInUse As Long
+Public NBuf As Long
+Public TotalOK As Long
+Public TotalFalha As Long
+Public FalhasSeguidas As Long
+Public Alarm_Balanca As Boolean
+
+'-------------------------
+' Variaveis do termopar
+'-------------------------
+Public PTemp_C As Float
+Public TempAgua_C As Float
+
+'-------------------------
+' Variaveis do pluviometro
+'-------------------------
+Public Pluvio_Basculadas_1s As Float
+Public Pluvio_Total As Float
+Public Pluvio_Chuva_mm As Float
+
+'-------------------------
+' Variaveis internas
+'-------------------------
+Dim BytesVistos As Boolean
+Dim TemDigito As Boolean
+Dim i As Long
+Dim k As Long
+Dim b As Long
+
+'==================================================================
+' TABELA DA BALANCA
+'==================================================================
+DataTable(Balanca1s,True,20000)
+  Sample(1,Peso_g,IEEE4)
+  Sample(1,StatusBal,Long)
+  Sample(1,LinhaNova,Boolean)
+  Sample(1,BaudInUse,Long)
+  Sample(1,LastLine,String)
+EndTable
+
+'==================================================================
+' RESUMO DA BALANCA
+'==================================================================
+DataTable(Resumo,True,1440)
+  DataInterval(0,1,Min,10)
+  Sample(1,TotalOK,Long)
+  Sample(1,TotalFalha,Long)
+  Sample(1,FalhasSeguidas,Long)
+EndTable
+
+'==================================================================
+' TABELA DO TERMOPAR
+'==================================================================
+DataTable(Termopar1s,True,20000)
+  Sample(1,TempAgua_C,IEEE4)
+  Sample(1,PTemp_C,IEEE4)
+EndTable
+
+'==================================================================
+' TABELA DO PLUVIOMETRO
+'==================================================================
+DataTable(Pluviometro1s,True,20000)
+  DataInterval(0,1,Sec,10)
+  Sample(1,Pluvio_Basculadas_1s,IEEE4)
+  Sample(1,Pluvio_Total,IEEE4)
+  Sample(1,Pluvio_Chuva_mm,IEEE4)
+EndTable
+
+'==================================================================
+' PROGRAMA PRINCIPAL
+'==================================================================
+BeginProg
+
+  '--------------------------------------------------------------
+  ' Configuracao da balanca
+  '--------------------------------------------------------------
+  BaudSel = 9600
+  FatorG = 1
+  BaudInUse = BaudSel
+
+  SerialOpen(ComC5,BaudSel,SerFmtBal,0,1000,0)
+  SerialFlush(ComC5)
+
+  '--------------------------------------------------------------
+  ' Inicializacao das variaveis
+  '--------------------------------------------------------------
+  Peso_g = NAN
+  TempAgua_C = NAN
+  PTemp_C = NAN
+
+  Pluvio_Basculadas_1s = 0
+  Pluvio_Total = 0
+  Pluvio_Chuva_mm = 0
+
+  TotalOK = 0
+  TotalFalha = 0
+  FalhasSeguidas = 0
+  Alarm_Balanca = False
+
+  Scan(1,Sec,0,0)
+
+    '============================================================
+    ' TERMOPAR T - CANAL DIFERENCIAL 1
+    '============================================================
+    PanelTemp(PTemp_C,4000)
+
+    TCDiff(TempAgua_C,1,mV200C,1,TypeT,PTemp_C,True,0,60,1,0)
+
+    '============================================================
+    ' PLUVIOMETRO - CONTATO SECO P1/G
+    '============================================================
+    PulseCount(Pluvio_Basculadas_1s,1,P1,1,0,1,0)
+
+    Pluvio_Total = Pluvio_Total + Pluvio_Basculadas_1s
+
+    Pluvio_Chuva_mm = Pluvio_Total * Pluvio_mmPorBasculada
+
+    '============================================================
+    ' BALANCA - AQUISICAO SERIAL
+    '============================================================
+    LinhaNova = False
+    BytesVistos = False
+    Peso_g = NAN
+    LastLine = ""
+    StatusBal = 1
+
+    If BaudSel <> BaudInUse Then
+
+      If BaudSel = 1200 OR BaudSel = 2400 OR BaudSel = 4800 OR BaudSel = 9600 OR BaudSel = 19200 OR BaudSel = 38400 OR BaudSel = 57600 OR BaudSel = 115200 Then
+
+        SerialClose(ComC5)
+        SerialOpen(ComC5,BaudSel,SerFmtBal,0,1000,0)
+        SerialFlush(ComC5)
+        BaudInUse = BaudSel
+
+      Else
+        BaudSel = BaudInUse
+      EndIf
+
+    EndIf
+
+    For k = 1 To 8
+
+      NBuf = SerialInChk(ComC5)
+
+      If NBuf = 0 Then
+        ExitFor
+      EndIf
+
+      BytesVistos = True
+      RxLine = ""
+
+      SerialIn(RxLine,ComC5,10,CHR(10),60)
+
+      If Right(RxLine,1) = CHR(10) Then
+        LastLine = RxLine
+        LinhaNova = True
+      EndIf
+
+    Next k
+
+    If BytesVistos = False Then
+
+      StatusBal = 1
+
+    ElseIf LinhaNova = False Then
+
+      StatusBal = 2
+
+    Else
+
+      TemDigito = False
+
+      For i = 1 To Len(LastLine)
+
+        b = ASCII(Mid(LastLine,i,1))
+
+        If b >= 48 AND b <= 57 Then
+          TemDigito = True
+        EndIf
+
+      Next i
+
+      If Len(LastLine) < MsgLenMin OR TemDigito = False Then
+
+        StatusBal = 3
+
+      Else
+
+        NumLido(1) = NAN
+        NumLido(2) = NAN
+        NumLido(3) = NAN
+
+        ' Extracao experimental: validar com mensagem real
+        ' da MK30K1.
+        SplitStr(NumLido(1),LastLine,"",3,0)
+
+        Peso_g = NumLido(1) * FatorG
+
+        If Peso_g < PesoMin OR Peso_g > PesoMax Then
+
+          Peso_g = NAN
+          StatusBal = 4
+
+        Else
+
+          StatusBal = 0
+
+        EndIf
+
+      EndIf
+
+    EndIf
+
+    If StatusBal = 0 Then
+
+      TotalOK = TotalOK + 1
+      FalhasSeguidas = 0
+      Alarm_Balanca = False
+
+    Else
+
+      TotalFalha = TotalFalha + 1
+      FalhasSeguidas = FalhasSeguidas + 1
+
+      If FalhasSeguidas > 5 Then
+        Alarm_Balanca = True
+      EndIf
+
+    EndIf
+
+    '============================================================
+    ' REGISTRO DOS DADOS
+    '============================================================
+    CallTable Balanca1s
+    CallTable Resumo
+    CallTable Termopar1s
+    CallTable Pluviometro1s
+
+  NextScan
+
+EndProg

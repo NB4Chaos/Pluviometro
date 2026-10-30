@@ -1,0 +1,21 @@
+# ambientes e caches
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+.ruff_cache/
+**/.ruff_cache/
+*.pyc
+# dados operacionais (ficam na pasta de dados do laboratório, nunca no repositório)
+dados_cr1000x.db
+dados_cr1000x.db-shm
+dados_cr1000x.db-wal
+**/dados_cr1000x.db
+**/dados_cr1000x.db-shm
+**/dados_cr1000x.db-wal
+cursor_cr1000x.json
+**/cursor_cr1000x.json
+logs/
+**/logs/
+servidor.lock
+config.json.tmp

@@ -1,0 +1,25 @@
+{
+  "mass_unit": "g",
+  "temp_unit": "C",
+  "flow_unit": "L/min",
+  "mass_decimals": 1,
+  "temp_decimals": 2,
+  "flow_decimals": 3,
+  "density_g_cm3": 0.9982,
+  "tip_resolution_mm": 0.2,
+  "default_range_s": 900,
+  "catch_area_cm2": 300.0,
+  "flow_k_pulses_per_l": 0.01,
+  "trial_duration_s": 60,
+  "cor": {
+    "q4": 0.0,
+    "q20": 100.0,
+    "unit": "L/min"
+  },
+  "comm": {
+    "protocol": "http",
+    "address": "",
+    "user": "",
+    "profile": "programa_vazao"
+  }
+}

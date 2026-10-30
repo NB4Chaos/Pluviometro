@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projeto Linha de Ar | Elus</title>
+<style>
+:root{--navy:#0b1f3a;--navy2:#122d50;--yellow:#f5c400;--bg:#f3f6fa;--card:#fff;--text:#17263b;--muted:#64748b;--line:#dce4ee;--green:#16835b;--red:#c53b3b;--orange:#a96308;--shadow:0 8px 28px rgba(12,31,58,.07)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
+header{background:linear-gradient(115deg,var(--navy),var(--navy2));color:white;padding:22px clamp(16px,4vw,48px);border-bottom:4px solid var(--yellow)}
+.head{max-width:1400px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:14px}.logo{width:48px;height:48px;border:2px solid var(--yellow);border-radius:12px;display:grid;place-items:center;font-weight:900;color:var(--yellow);letter-spacing:-2px;font-size:20px}
+h1{font-size:clamp(21px,3vw,29px);margin:0 0 4px}header p{margin:0;color:#d5dfeb;font-size:13px}
+.pill{border-radius:999px;padding:8px 12px;font-size:12px;font-weight:800;letter-spacing:.04em;background:#243d5c;color:#dce8f5;border:1px solid #47617e}
+main{max-width:1400px;margin:24px auto;padding:0 clamp(14px,3vw,32px) 40px}
+.notice{background:#fff8df;border:1px solid #f0d878;border-radius:12px;padding:13px 16px;margin-bottom:18px;color:#604b00;font-size:13px;line-height:1.5}
+.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:19px;box-shadow:var(--shadow);min-width:0}.span-12{grid-column:span 12}.span-8{grid-column:span 8}.span-7{grid-column:span 7}.span-6{grid-column:span 6}.span-5{grid-column:span 5}.span-4{grid-column:span 4}
+.card-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.card-title h2{font-size:16px;margin:0}.eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:10px;color:var(--muted);font-weight:800}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.kpi{border:1px solid var(--line);border-radius:12px;padding:15px;min-height:118px}.kpi .label{color:var(--muted);font-size:12px;margin-bottom:10px}.kpi .value{font-size:clamp(22px,3vw,32px);font-weight:800;letter-spacing:-.04em;white-space:nowrap}.kpi .unit{font-size:12px;color:var(--muted);font-weight:600;letter-spacing:0}.kpi .sub{font-size:11px;color:var(--muted);margin-top:8px}
+.status{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:800}.dot{width:8px;height:8px;border-radius:50%;background:#9aa8b8}.dot.good{background:var(--green)}.dot.bad{background:var(--red)}.dot.warn{background:var(--orange)}
+label{display:block;font-size:12px;font-weight:700;color:#42536a;margin-bottom:6px}input,select{width:100%;padding:11px 12px;border:1px solid #cbd6e2;border-radius:9px;background:#fff;font:inherit;color:var(--text)}input:focus,select:focus{outline:2px solid #bed5f4;border-color:#4779b8}
+.formgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.formgrid .full{grid-column:span 2}
+button{border:0;border-radius:9px;padding:11px 15px;font:inherit;font-weight:800;cursor:pointer;transition:.15s}button:disabled{cursor:not-allowed;opacity:.45}.btn-primary{background:var(--navy);color:white}.btn-primary:hover:not(:disabled){background:#183b64}.btn-yellow{background:var(--yellow);color:#1d2a3c}.btn-outline{background:white;border:1px solid #cbd6e2;color:var(--text)}.btn-danger{background:#fff0f0;border:1px solid #f0baba;color:#9e2525}.btn-row{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}
+.help{font-size:12px;line-height:1.55;color:var(--muted);margin-top:10px}.message{margin-top:12px;font-size:12px;line-height:1.5;padding:10px 12px;border-radius:9px;background:#f1f5f9;color:#334155}.message.error{background:#fff0f0;color:#9e2525}.message.success{background:#eaf8f1;color:#126443}
+.divider{height:1px;background:var(--line);margin:15px 0}.tag{font-size:11px;font-weight:800;border-radius:7px;padding:5px 8px;background:#eef2f7;color:#44566c}.tag.warn{background:#fff3d7;color:#865300}.tag.ok{background:#e4f6ed;color:#146345}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:700}td:last-child{text-align:right;font-variant-numeric:tabular-nums}.raw{font-family:ui-monospace,Consolas,monospace}
+.footer{color:var(--muted);font-size:11px;line-height:1.6;text-align:center;margin-top:22px}
+@media(max-width:950px){.span-8,.span-7,.span-6,.span-5,.span-4{grid-column:span 12}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.formgrid{grid-template-columns:1fr}.formgrid .full{grid-column:span 1}.kpis{grid-template-columns:1fr 1fr}.card{padding:15px}}
+</style>
+</head>
+<body>
+<header><div class="head">
+  <div class="brand"><div class="logo">EL</div><div><h1>Projeto Linha de Ar</h1><p>Supervisão local · WEG CFW500 · Modbus RTU</p></div></div>
+  <div class="pill">MODBUS · SETPOINT PID · COMANDOS OPERACIONAIS</div>
+</div></header>
+<main>
+  <div class="notice"><strong>Atenção operacional:</strong> esta versão escreve o setpoint PID <strong>P0525</strong> e envia comandos de partida/parada normal via <strong>P0682</strong>. A partida exige confirmação e validações, mas não substitui proteções, intertravamentos nem a emergência física. Confirme sentido de giro, limites de frequência, escala real do medidor e condição segura antes de partir.</div>
+  <div class="grid">
+    <section class="card span-12">
+      <div class="card-title"><h2>Estado da conexão</h2><span id="connectionBadge" class="status"><span class="dot" id="connectionDot"></span><span id="connectionText">Desconectado</span></span></div>
+      <div class="formgrid">
+        <div><label for="port">Porta serial</label><input id="port" value="{{ default_port }}" placeholder="COM6"></div>
+        <div><label for="unitId">ID Modbus</label><input id="unitId" type="number" min="1" max="247" value="{{ default_unit_id }}"></div>
+        <div><label for="baud">Baud rate</label><select id="baud"><option>9600</option><option selected>19200</option><option>38400</option><option>57600</option><option>115200</option></select></div>
+        <div><label for="parity">Paridade</label><select id="parity"><option value="E" selected>Par (Even)</option><option value="N">Nenhuma (None)</option><option value="O">Ímpar (Odd)</option></select></div>
+      </div>
+      <div class="btn-row"><button class="btn-primary" id="connectBtn" onclick="connectInverter()">Conectar e testar leitura</button><button class="btn-outline" id="disconnectBtn" onclick="disconnectInverter()" disabled>Desconectar</button><button class="btn-outline" onclick="refreshNow()">Atualizar agora</button></div>
+      <div id="connectionMessage" class="message">O software tentará ler P0308 para validar a comunicação. Nenhum comando será escrito.</div>
+      <div class="help">Parâmetros iniciais conhecidos: P0308=1, P0310=1 (19.200 bit/s), P0311=1 (8E1), P0312=2 (Modbus RTU serial 1), P0316=1. Feche o WEG Programming Suite antes de conectar este aplicativo, pois uma porta COM geralmente só pode ser usada por um programa de cada vez.</div>
+    </section>
+
+    <section class="card span-12">
+      <div class="card-title"><h2>Monitoração em tempo real</h2><span class="tag" id="updatedAt">Sem leitura</span></div>
+      <div class="kpis">
+        <div class="kpi"><div class="label">Frequência de saída</div><div class="value"><span id="freqValue">—</span> <span class="unit">Hz</span></div><div class="sub">P0006 · valor lido do inversor</div></div>
+        <div class="kpi"><div class="label">Corrente do motor</div><div class="value"><span id="currentValue">—</span> <span class="unit">A</span></div><div class="sub">P0003 · valor lido do inversor</div></div>
+        <div class="kpi"><div class="label">Variável de processo PID</div><div class="value"><span id="pvValue">—</span></div><div class="sub">P0040 · escala depende de P0529</div></div>
+        <div class="kpi"><div class="label">Setpoint interno PID</div><div class="value"><span id="pidSpValue">—</span></div><div class="sub">P0041 · leitura, não envio do setpoint</div></div>
+      </div>
+      <div class="divider"></div>
+      <div class="kpis">
+        <div class="kpi"><div class="label">Palavra de estado</div><div class="value raw" style="font-size:23px" id="statusWord">—</div><div class="sub">P0680 · hexadecimal</div></div>
+        <div class="kpi"><div class="label">Velocidade via serial</div><div class="value raw" style="font-size:23px" id="speedRaw">—</div><div class="sub">P0681 · valor bruto, escala a confirmar</div></div>
+        <div class="kpi"><div class="label">Realimentação selecionada</div><div class="value" style="font-size:19px" id="feedbackState">—</div><div class="sub">P0203</div></div>
+        <div class="kpi"><div class="label">Interface serial</div><div class="value" style="font-size:19px" id="serialState">—</div><div class="sub">P0316</div></div>
+      </div>
+      <div id="telemetryMessage" class="message">Aguardando conexão. Nenhum valor fictício será exibido.</div>
+    </section>
+
+    <section class="card span-7">
+      <div class="card-title"><h2>Configuração de vazão e setpoint desejado</h2><span class="tag ok">Envio P0525 disponível</span></div>
+      <div class="formgrid">
+        <div><label for="flow4">Vazão correspondente a 4 mA (m³/h)</label><input id="flow4" type="number" min="0" step="any" value="{{ flow_4ma }}"></div>
+        <div><label for="flow20">Vazão correspondente a 20 mA (m³/h)</label><input id="flow20" type="number" min="0" step="any" value="{{ flow_20ma }}"></div>
+        <div class="full"><label for="setpoint">Vazão desejada (m³/h)</label><input id="setpoint" type="number" min="0" step="any" value="100"></div>
+      </div>
+      <div class="btn-row"><button class="btn-outline" onclick="calculateSetpoint()">Calcular setpoint</button><button class="btn-yellow" id="sendSetpointBtn" onclick="sendSetpoint()" disabled>Enviar setpoint ao inversor</button></div>
+      <div class="help">A escala é linear: 4 mA = vazão mínima configurada; 20 mA = vazão máxima. O software converte a vazão em 0–100% e escreve P0525. O envio altera a referência do PID, mas não inicia o motor.</div>
+      <div class="kpis" style="margin-top:14px">
+        <div class="kpi"><div class="label">Setpoint normalizado</div><div class="value"><span id="percentValue">—</span><span class="unit"> %</span></div></div>
+        <div class="kpi"><div class="label">Corrente equivalente</div><div class="value"><span id="equivCurrent">—</span><span class="unit"> mA</span></div></div>
+      </div>
+      <div id="calcMessage" class="message">Calcule o setpoint e conecte o inversor. O botão de envio só será habilitado quando houver conexão Modbus.</div>
+    </section>
+
+    <section class="card span-5">
+      <div class="card-title"><h2>Comandos operacionais</h2><span class="tag warn" id="motorStateTag">Motor não confirmado</span></div>
+      <p style="font-size:13px;line-height:1.6;color:var(--muted);margin-top:0">A partida envia P0682 = 0x0017 (Gira/Para + habilitação geral + sentido direto + remoto). A parada normal envia P0682 = 0x0016, solicitando desaceleração pela rampa.</p>
+      <div class="btn-row"><button class="btn-primary" id="startMotorBtn" onclick="startMotor()" disabled>Confirmar e LIGAR motor</button><button class="btn-danger" id="stopMotorBtn" onclick="stopMotor()" disabled>PARAR motor (rampa)</button></div>
+      <div id="motorMessage" class="message">Conecte ao inversor. Antes da partida, envie e confirme um setpoint positivo. A parada normal depende da comunicação e da rampa configurada.</div>
+      <div class="message" style="margin-top:10px"><strong>Emergência:</strong> em perigo, use o botão físico de emergência. O botão PARAR deste software é uma parada normal por Modbus, não uma parada de emergência.</div>
+    </section>
+
+    <section class="card span-12">
+      <div class="card-title"><h2>Diagnóstico e parâmetros lidos</h2><span class="tag">Somente leitura</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Parâmetro</th><th>Descrição</th><th>Valor lido</th></tr></thead><tbody id="parameterTable"><tr><td colspan="3">Conecte o inversor para carregar os parâmetros.</td></tr></tbody></table></div>
+      <div class="help">Os endereços Modbus do CFW500 são de offset zero: o número do parâmetro é o endereço do holding register. A aplicação lê os parâmetros diretamente; se a resposta não for válida, os cartões permanecem sem valor.</div>
+    </section>
+  </div>
+  <div class="footer">Projeto Linha de Ar · Interface local · Setpoint PID P0525 e comandos operacionais P0682 · Dados somente quando recebidos do CFW500</div>
+</main>
+<script>
+let connected = false;
+let pollHandle = null;
+const $ = id => document.getElementById(id);
+const fmt = (n, digits=1) => Number.isFinite(Number(n)) ? Number(n).toLocaleString('pt-BR',{minimumFractionDigits:digits,maximumFractionDigits:digits}) : '—';
+
+function setConnection(ok, text) {
+  connected = ok;
+  $('connectionText').textContent = text;
+  $('connectionDot').className = 'dot ' + (ok ? 'good' : 'bad');
+  $('connectBtn').disabled = ok;
+  $('disconnectBtn').disabled = !ok;
+  $('sendSetpointBtn').disabled = !ok;
+  $('startMotorBtn').disabled = !ok;
+  $('stopMotorBtn').disabled = !ok;
+}
+function showMessage(id, text, type='') {
+  const el = $(id); el.textContent = text; el.className = 'message' + (type ? ' '+type : '');
+}
+async function connectInverter() {
+  $('connectBtn').disabled = true;
+  showMessage('connectionMessage','Abrindo porta serial e testando leitura Modbus…');
+  try {
+    const response = await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      port:$('port').value.trim(), unit_id:Number($('unitId').value), baudrate:Number($('baud').value), parity:$('parity').value
+    })});
+    const result = await response.json();
+    if(!response.ok || !result.ok) throw new Error(result.error || result.message || 'Falha ao conectar.');
+    setConnection(true,'Conectado');
+    showMessage('connectionMessage',result.message,'success');
+    await refreshNow();
+    if(pollHandle) clearInterval(pollHandle);
+    pollHandle = setInterval(refreshNow,1000);
+  } catch(err) {
+    setConnection(false,'Sem comunicação');
+    showMessage('connectionMessage',err.message,'error');
+    $('connectBtn').disabled = false;
+  }
+}
+async function disconnectInverter() {
+  if(pollHandle) clearInterval(pollHandle);
+  pollHandle = null;
+  try { await fetch('/api/disconnect',{method:'POST'}); } catch(e) {}
+  setConnection(false,'Desconectado');
+  clearTelemetry();
+  showMessage('connectionMessage','Conexão encerrada. Nenhum comando foi enviado ao motor.');
+}
+function clearTelemetry() {
+  ['freqValue','currentValue','pvValue','pidSpValue','statusWord','speedRaw','feedbackState','serialState'].forEach(id=>$(id).textContent='—');
+  $('updatedAt').textContent='Sem leitura';
+  $('parameterTable').innerHTML='<tr><td colspan="3">Sem dados: conecte o inversor.</td></tr>';
+}
+async function refreshNow() {
+  try {
+    const response = await fetch('/api/telemetry',{cache:'no-store'});
+    const result = await response.json();
+    if(!result.telemetry || !result.telemetry.connected) {
+      if(connected) {
+        setConnection(false,'Falha de leitura');
+        showMessage('telemetryMessage',result.telemetry?.error || 'Sem resposta Modbus.','error');
+      }
+      return;
+    }
+    const d = result.telemetry.data;
+    setConnection(true,'Conectado');
+    $('freqValue').textContent=fmt(d.output_frequency_hz,1);
+    $('currentValue').textContent=fmt(d.motor_current_a,1);
+    $('pvValue').textContent=fmt(d.pid_process_value,1);
+    $('pidSpValue').textContent=fmt(d.pid_setpoint,1);
+    $('statusWord').textContent=d.p0680_hex;
+    $('motorStateTag').textContent = d.status_fault ? 'FALHA' : (d.status_running ? 'Motor em giro' : (d.status_enabled ? 'Habilitado / parado' : 'Pronto / parado'));
+    $('motorStateTag').className = 'tag ' + (d.status_fault ? 'warn' : (d.status_running ? 'ok' : ''));
+    if (d.status_fault) showMessage('motorMessage','O inversor indica falha ativa em P0680. A partida será bloqueada. Consulte o código de falha no CFW500.','error');
+    $('speedRaw').textContent=d.p0681_raw;
+    $('feedbackState').textContent=d.p0203===0?'Não selecionada (P0203=0)':String(d.p0203);
+    $('serialState').textContent=d.p0316===1?'Ativa (1)':String(d.p0316);
+    $('updatedAt').textContent='Atualizado '+new Date(result.telemetry.timestamp).toLocaleTimeString('pt-BR');
+    const feedbackText = d.p0203 === 1 && d.p0222 === 0 && d.p0528 === 4000 && d.p0529 === 1
+      ? 'Configuração básica compatível com envio do setpoint: P0203=1, P0222=0, P0528=4000 e P0529=1. O envio ainda exige confirmação explícita.'
+      : `Configuração não validada para envio: P0203=${d.p0203}, P0222=${d.p0222}, P0528=${d.p0528}, P0529=${d.p0529}. O servidor bloqueará a escrita.`;
+    showMessage('telemetryMessage',feedbackText,d.p0203 === 1 && d.p0222 === 0 && d.p0528 === 4000 && d.p0529 === 1 ? 'success' : 'error');
+    const rows = [
+      ['P0003','Corrente do motor',`${fmt(d.motor_current_a,1)} A (raw ${d.p0003_raw})`],
+      ['P0006','Frequência de saída',`${fmt(d.output_frequency_hz,1)} Hz (raw ${d.p0006_raw})`],
+      ['P0040','Variável de processo PID',`${fmt(d.pid_process_value,1)} (raw ${d.p0040_raw})`],
+      ['P0041','Setpoint PID',`${fmt(d.pid_setpoint,1)} (raw ${d.p0041_raw})`],
+      ['P0018','AI1 monitor (%)',`${fmt(d.ai1_percent,1)}% (raw ${d.p0018_raw})`],
+      ['P0203','Seleção PID/realimentação',String(d.p0203)],
+      ['P0220','Fonte LOC/REM',String(d.p0220)],
+      ['P0222','Referência remota',String(d.p0222)],
+      ['P0227','Comando Gira/Para remoto',String(d.p0227)],
+      ['P0233','Tipo de sinal AI1',String(d.p0233)],
+      ['P0308','Endereço serial',String(d.p0308)],
+      ['P0310','Taxa serial',String(d.p0310)],
+      ['P0311','Formato serial',String(d.p0311)],
+      ['P0312','Protocolo serial',String(d.p0312)],
+      ['P0316','Estado da interface serial',String(d.p0316)],
+      ['P0403','Frequência nominal (raw)',String(d.p0403_raw)],
+      ['P0525','Setpoint interno PID',`${fmt(d.pid_internal_setpoint_percent,1)}% (raw ${d.p0525_raw})`],
+      ['P0528','Fundo de escala PID',String(d.p0528)],
+      ['P0529','Formato PID',String(d.p0529)],
+      ['P0536','Backup automático P0525',String(d.p0536)],
+      ['P0680','Palavra de estado',`${d.p0680} (${d.p0680_hex})`],
+      ['P0681','Velocidade via serial (raw)',String(d.p0681_raw)],
+      ['P0682','Palavra de controle serial',`${d.p0682_hex} (raw ${d.p0682_raw})`]
+    ];
+    $('parameterTable').innerHTML=rows.map(r=>`<tr><td class="raw">${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');
+  } catch(err) {
+    showMessage('telemetryMessage','Erro ao consultar a API local: '+err.message,'error');
+  }
+}
+async function calculateSetpoint() {
+  try {
+    const response = await fetch('/api/calculate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      flow_4ma:$('flow4').value, flow_20ma:$('flow20').value, setpoint:$('setpoint').value
+    })});
+    const result = await response.json();
+    if(!response.ok || !result.ok) throw new Error(result.error || 'Não foi possível calcular.');
+    $('percentValue').textContent=fmt(result.percentage,2);
+    $('equivCurrent').textContent=fmt(result.equivalent_current_ma,2);
+    showMessage('calcMessage',result.message+' Percentual: '+fmt(result.percentage,2)+'%; corrente equivalente matemática: '+fmt(result.equivalent_current_ma,2)+' mA.','success');
+  } catch(err) { showMessage('calcMessage',err.message,'error'); }
+}
+async function sendSetpoint() {
+  if (!connected) { showMessage('calcMessage','Conecte ao inversor antes de enviar.','error'); return; }
+  const flow = Number($('setpoint').value);
+  if (!Number.isFinite(flow)) { showMessage('calcMessage','Informe uma vazão válida.','error'); return; }
+  const ok = window.confirm(`Enviar setpoint de ${fmt(flow,2)} m³/h ao CFW500?\n\nO software escreverá somente P0525 (setpoint PID). Não enviará partida nem parada. Confirme que a instalação está segura.`);
+  if (!ok) return;
+  $('sendSetpointBtn').disabled = true;
+  showMessage('calcMessage','Validando parâmetros de segurança e enviando P0525…');
+  try {
+    const response = await fetch('/api/setpoint',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      flow_4ma:$('flow4').value, flow_20ma:$('flow20').value, setpoint:$('setpoint').value, confirmed:true
+    })});
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || 'Falha ao enviar setpoint.');
+    showMessage('calcMessage',result.message+` P0041 lido após envio: ${fmt(result.p0041_display,1)}; P0040 atual: ${fmt(result.p0040_display,1)}.`, 'success');
+    await refreshNow();
+  } catch(err) { showMessage('calcMessage',err.message,'error'); }
+  finally { $('sendSetpointBtn').disabled = !connected; }
+}
+
+async function startMotor() {
+  if (!connected) { showMessage('motorMessage','Conecte ao inversor antes de comandar a partida.','error'); return; }
+  const flow = Number($('setpoint').value);
+  if (!Number.isFinite(flow) || flow <= 0) { showMessage('motorMessage','Informe uma vazão positiva e envie o setpoint antes de partir.','error'); return; }
+  const ok = window.confirm(`CONFIRMAÇÃO DE PARTIDA
+
+O CFW500 receberá P0682 = 0x0017 para habilitar e girar o motor no sentido direto. Setpoint na interface: ${fmt(flow,2)} m³/h.
+
+Confirme que a área está livre, o sentido de giro é seguro, os limites e intertravamentos foram verificados e você está pronto para parar o equipamento. A emergência física permanece disponível.
+
+Deseja enviar o comando de partida?`);
+  if (!ok) return;
+  $('startMotorBtn').disabled = true;
+  showMessage('motorMessage','Validando estado/configuração e enviando comando de partida…');
+  try {
+    const response = await fetch('/api/motor/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmed:true,flow_4ma:$('flow4').value,flow_20ma:$('flow20').value,setpoint:$('setpoint').value})});
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || 'Falha ao enviar comando de partida.');
+    showMessage('motorMessage',`${result.message} Palavra enviada: ${result.command_hex}; P0680 após comando: ${result.p0680_hex}; P0006=${result.p0006}.`,'success');
+    await refreshNow();
+  } catch(err) { showMessage('motorMessage',err.message,'error'); }
+  finally { $('startMotorBtn').disabled = !connected; }
+}
+async function stopMotor() {
+  if (!connected) { showMessage('motorMessage','Sem conexão Modbus. Se houver risco, use o procedimento físico de segurança.','error'); return; }
+  const ok = window.confirm(`Enviar parada normal por rampa ao CFW500 (P0682 = 0x0016)?\n\nIsso NÃO é uma parada de emergência. Em perigo, use o botão físico de emergência.`);
+  if (!ok) return;
+  $('stopMotorBtn').disabled = true;
+  showMessage('motorMessage','Enviando parada normal pela rampa…');
+  try {
+    const response = await fetch('/api/motor/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmed:true})});
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || 'Falha ao enviar parada normal.');
+    showMessage('motorMessage',`${result.message} Palavra enviada: ${result.command_hex}; P0680: ${result.p0680_hex}; P0006=${result.p0006}.`,'success');
+    await refreshNow();
+  } catch(err) { showMessage('motorMessage',err.message,'error'); }
+  finally { $('stopMotorBtn').disabled = !connected; }
+}
+</script>
+</body>
+</html>

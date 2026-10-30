@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/img/icone-32.png">
+<title>Relatório do ensaio · Elus</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;500;600&display=swap">
+<style>
+  /* Página de relatório: montada no navegador a partir de /api/trials/<id>. Imprimir = Ctrl+P → "Salvar como PDF". */
+  body{margin:0;padding:24px;font-family:'Urbanist',system-ui,sans-serif;color:#0B1F4B;background:#fff;max-width:900px;margin:0 auto}
+  h1{font-size:24px;font-weight:500;margin:0 0 4px}h2{font-size:16px;font-weight:600;margin:22px 0 8px;border-bottom:1px solid #E3E7F0;padding-bottom:4px}
+  .sub{color:#5B6B8C;font-size:13px}.ok{color:#14733F}.warn{color:#8A5A00}.err{color:#B3261E}
+  table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #EEF1F8;vertical-align:top}th{color:#5B6B8C;font-weight:500;width:46%}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+  .btn{display:inline-block;padding:10px 20px;border-radius:999px;background:#FFC20E;color:#0B1F4B;font-weight:600;border:0;font:inherit;cursor:pointer}
+  .top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:16px}
+  .note{font-size:12px;color:#5B6B8C}
+  @media print{.noprint{display:none}body{padding:0}@page{margin:18mm}}
+</style>
+</head>
+<body>
+<div class="top noprint"><span class="sub">Este relatório contém só o que foi adquirido e os parâmetros usados. Cálculos metrológicos (incerteza, rastreabilidade) são feitos na planilha.</span><button class="btn" onclick="window.print()">Imprimir / salvar PDF</button></div>
+<div id="r"><p class="sub">Carregando…</p></div>
+<script>
+const $ = s => document.querySelector(s), p2 = n => String(n).padStart(2, '0');
+const num = (v, d = 1) => v == null || isNaN(v) ? '—' : v.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+const dt = t => { if (t == null) return '—'; const d = new Date(t); return `${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`; };
+const mmss = s => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const STATE = { completed: ['Concluído', 'ok'], incomplete: ['Incompleto', 'warn'], interrupted: ['Interrompido', 'err'], running: ['Em andamento', 'warn'] };
+const KIND = { pluv: 'Pluviômetro × balança (gravimétrico)', flow: 'Medidor de vazão × balança (comparativo)' };
+const row = (k, v, u = '') => `<tr><th>${k}</th><td>${v}${u && v !== '—' ? ' ' + u : ''}</td></tr>`;
+(async () => {
+  const id = location.pathname.split('/').pop();
+  const r = await fetch('/api/trials/' + id); if (!r.ok) { $('#r').innerHTML = '<p class="err">Ensaio não encontrado.</p>'; return; }
+  const t = await r.json(), res = t.result || {}, q = res.quality || {}, g = res.gravimetric || {}, f = res.flow, tp = res.temperature, c = t.cfg || {};
+  const [lab, cls] = STATE[t.state] || [t.state, ''], eff = (t.end_ts - t.start_ts) / 1000;
+  document.title = `Ensaio ${t.id} · Elus`;
+  let h = `<h1>Relatório de aquisição · Ensaio ${t.id}</h1><p class="sub">Monitor de calibração de pluviômetros · Elus Instrumentação · gerado em ${dt(Date.now())}</p>`;
+  h += `<h2>Identificação</h2><table>${row('Tipo de ensaio', KIND[t.kind] || t.kind)}${row('Estado', `<b class="${cls}">${lab}</b>${t.reason ? ' · ' + t.reason : ''}`)}
+    ${row('Início (hora do datalogger)', dt(t.start_ts))}${row('Fim (hora do datalogger)', dt(t.end_ts))}${row('Duração configurada', mmss(t.duration_cfg_s) + ' (' + t.duration_cfg_s + ' s)')}
+    ${row('Duração efetiva da janela', mmss(eff) + ' (' + num(eff, 0) + ' s)')}${row('Intervalo da referência (1ª → última leitura válida de massa)', num(g.duration_s, 1), 's')}
+    ${row('Amostras na janela / cobertas', `${q.rows ?? '—'} · ${num(q.covered_s, 0)} s de ${num(q.window_s, 0)} s${q.gaps ? ` · ${q.gaps} lacuna(s)` : ''}`)}
+    ${row('Leituras de massa válidas', g.mass_valid_fraction == null ? '—' : num(100 * g.mass_valid_fraction, 0) + ' %')}</table>`;
+  h += `<h2>Parâmetros usados (congelados no início do ensaio)</h2><table>${row('Resolução do pluviômetro', num(c.res_mm, 3), 'mm/basculada')}${row('Área de captação', num(c.area_cm2, 1), 'cm²')}
+    ${row('Densidade da água', num(c.density, 4), 'g/cm³')}${f ? row('Fator K', num(c.k_pulses_per_l, 1), 'pulsos/L') + row('Faixa 4–20 mA', c.q4 == null ? '—' : `${num(c.q4, 3)} → ${num(c.q20, 3)} ${c.range_unit}`) : ''}</table>`;
+  h += `<div class="two"><div><h2>Pluviômetro (instrumento)</h2><table>${row('Basculadas no intervalo', g.pulses_window ?? '—')}${row('Precipitação indicada', num(g.pluv_precip_mm, 3), 'mm')}
+    ${row('Intensidade indicada', num(g.pluv_intensity_mm_h, 2), 'mm/h')}${row('Volume equivalente', num(g.pluv_precip_mm != null && c.area_cm2 ? g.pluv_precip_mm * c.area_cm2 / 10 : null, 1), 'mL')}</table></div>
+    <div><h2>Balança (referência)</h2><table>${row('Massa inicial → final', g.mass_start_g == null ? '—' : `${num(g.mass_start_g, 1)} → ${num(g.mass_end_g, 1)}`, 'g')}${row('Massa de água coletada (Δm)', num(g.delta_mass_g, 1), 'g')}
+    ${row('Volume (Δm ÷ ρ)', num(g.volume_ml, 1), 'mL')}${row('Precipitação equivalente', num(g.precip_ref_mm, 3), 'mm')}${row('Intensidade equivalente', num(g.intensity_ref_mm_h, 2), 'mm/h')}${row('Vazão equivalente', num(g.flow_ref_l_min, 4), 'L/min')}</table></div></div>`;
+  if (f) { const v = f.vs_reference || {}, fl = f.flow_l_min || {};
+    h += `<h2>Medidor de vazão</h2><table>${row('Modo', f.mode)}${row('Leituras válidas', `${f.n_valid}/${f.n_rows}`)}${row('Vazão média / mín / máx', `${num(fl.mean, 4)} / ${num(fl.min, 4)} / ${num(fl.max, 4)}`, 'L/min')}
+      ${row('Volume do medidor (mesmo intervalo)', num(v.volume_meter_l, 4), 'L')}${row('Volume pela balança (mesmo intervalo)', num(v.volume_ref_l, 4), 'L')}${f.pulses_total != null ? row('Pulsos brutos', f.pulses_total) : ''}${f.ma ? row('Corrente média', num(f.ma.mean, 3), 'mA') : ''}</table>`; }
+  if (tp) h += `<h2>Temperatura da água</h2><table>${row('Média / mín / máx', `${num(tp.mean_c, 2)} / ${num(tp.min_c, 2)} / ${num(tp.max_c, 2)}`, '°C')}${row('Leituras', tp.n)}</table>`;
+  const issues = [...(q.reasons || []), ...(g.issues || []), ...((f && f.issues) || [])];
+  h += `<h2>Ocorrências durante a aquisição</h2>${issues.length ? '<ul>' + [...new Set(issues)].map(i => `<li class="err">${i}</li>`).join('') + '</ul>' : '<p class="ok">Nenhuma.</p>'}`;
+  h += `<p class="note">Dados brutos (uma linha por segundo e uma por basculada): <a href="/api/trials/${t.id}/raw.csv">amostras</a> · <a href="/api/trials/${t.id}/tips.csv">basculadas</a>. Intervalo da referência = tempo entre a primeira e a última leitura válida de massa; a precipitação indicada conta as basculadas nesse mesmo intervalo.</p>`;
+  $('#r').innerHTML = h;
+})();
+</script>
+</body>
+</html>

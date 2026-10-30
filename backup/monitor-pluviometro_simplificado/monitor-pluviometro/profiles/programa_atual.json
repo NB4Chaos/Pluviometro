@@ -1,0 +1,9 @@
+{
+  "nome": "programa_atual",
+  "descricao": "Programa atual do usuario: tabelas Balanca1s, Termopar1s e Pluviometro1s (termopar tipo T, sem Coriolis)",
+  "mass": {"table": "Balanca1s", "value": "Peso_g", "factor": 1.0,
+           "status": "StatusBal", "status_map": {"0": "ok", "1": "no_comm", "2": "invalid", "3": "invalid", "4": "invalid"}},
+  "temp": {"table": "Termopar1s", "value": "TempAgua_C"},
+  "tips": {"table": "Pluviometro1s", "count": "Pluvio_Basculadas_1s"},
+  "cor": null
+}

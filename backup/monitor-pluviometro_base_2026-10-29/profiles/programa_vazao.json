@@ -1,0 +1,10 @@
+{
+  "nome": "programa_vazao",
+  "descricao": "Pluviometria_Vazao.CR1X: Balanca1s, Termopar1s, Pluviometro1s + Vazao1s (medidor de vazao por pulsos em P2 ou analogico em 2H/2L)",
+  "mass": {"table": "Balanca1s", "value": "Peso_g", "factor": 1.0,
+           "status": "StatusBal", "status_map": {"0": "ok", "1": "no_comm", "2": "invalid", "3": "invalid", "4": "invalid"}},
+  "temp": {"table": "Termopar1s", "value": "TempAgua_C"},
+  "tips": {"table": "Pluviometro1s", "count": "Pluvio_Basculadas_1s"},
+  "cor": null,
+  "flow": {"table": "Vazao1s", "mode": "Flow_mode", "ma": "Flow_mA", "status": "Flow_Status"}
+}

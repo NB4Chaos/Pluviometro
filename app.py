@@ -1,0 +1,1053 @@
+import copy, csv, hmac, io, json, logging, math, os, sqlite3, sys, threading, time
+from collections import deque
+from datetime import datetime
+from functools import wraps
+from logging.handlers import RotatingFileHandler
+
+# ---------- credenciais e conexão automática com o CR1000Xe ----------
+# A senha não fica gravada neste arquivo: é recuperada do Gerenciador de
+# Credenciais do Windows pelo pacote keyring, usando a conta do Windows atual.
+# Se DATALOGGER_PASSWORD já vier do ambiente (testes automáticos), o keyring não é consultado.
+if not os.environ.get("DATALOGGER_PASSWORD"):
+    import keyring
+    _KEYRING_SERVICE = "Elus-CR1000Xe"
+    _stored_user = keyring.get_password(_KEYRING_SERVICE, "DATALOGGER_USER")
+    _stored_password = keyring.get_password(_KEYRING_SERVICE, "DATALOGGER_PASSWORD")
+    if not _stored_user or not _stored_password:
+        raise RuntimeError(
+            "Credenciais do CR1000Xe não encontradas no armazenamento do Windows. "
+            "Cadastre DATALOGGER_USER e DATALOGGER_PASSWORD no serviço Elus-CR1000Xe."
+        )
+    os.environ["DATALOGGER_USER"] = _stored_user
+    os.environ["DATALOGGER_PASSWORD"] = _stored_password
+    os.environ.setdefault("DATALOGGER_HOST", "169.254.244.82")
+    os.environ.setdefault("DATALOGGER_PROTOCOL", "http")
+    os.environ.setdefault("CR1000X_PROFILE", "programa_vazao")
+
+from flask import Flask, Response, jsonify, render_template, request
+from flask_socketio import SocketIO
+
+import calc
+from datalogger import Reading, make_datalogger
+from trials import Trials, TrialError
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("ELUS_DATA_DIR") or BASE   # banco, cursor, config.json e logs (os testes usam uma pasta temporária)
+os.makedirs(DATA, exist_ok=True)
+CFG_PATH = os.path.join(DATA, "config.json")
+SAMPLE_PERIOD = float(os.environ.get("SAMPLE_PERIOD", "1.0"))  # s entre consultas ao datalogger (o Scan do CRBasic é de 1 s)
+SAMPLE_PHASE = float(os.environ.get("SAMPLE_PHASE", "0.25"))   # s depois do segundo cheio: o Scan já gravou as tabelas quando a consulta sai
+RETRY_S = 0.12                                                 # se a gravação do Scan ainda não chegou, nova tentativa curta (até 3)
+DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN") or None   # se definido, protege TODA operação de escrita
+MASS_UNITS, TEMP_UNITS = ("mg", "g", "kg", "lb", "oz"), ("C", "F", "K")
+FLOW_UNITS = ("L/min", "L/h", "mL/min", "mL/s", "m³/h", "m³/s", "m³/min", "kg/h", "kg/s")
+FLOW_METHODS, DUR_UNITS, K_UNITS = ("analog", "pulse"), ("ms", "s", "min"), calc.K_UNITS
+TRIAL_MAX_MS = 6 * 3600 * 1000
+DEFAULTS = {"mass_unit": "g", "temp_unit": "C", "flow_unit": "L/min", "mass_decimals": 1, "temp_decimals": 2,
+            "flow_decimals": 3, "density_g_cm3": None, "tip_resolution_mm": None,
+            "default_range_s": 900,
+            "catch_area_cm2": None,        # área da ABERTURA do coletor (cm²). Não é a da báscula.
+            # Medidor de Vazão: o CR1000Xe mede os dois canais (RG1 em mA; P2 em pulsos, no programa v4) em todo Scan.
+            # O MÉTODO é escolhido aqui, no servidor, e congelado no início de cada ensaio. Nada é escrito no datalogger.
+            "flow_method": "analog",       # analog | pulse
+            "flow_k_value": None, "flow_k_unit": "pulsos/L",   # fator K como o operador informou (nunca presumido)
+            "flow_k_pulses_per_l": None,   # fator K normalizado (pulsos/L): derivado dos dois acima; mantido por compatibilidade
+            "flow_ma_tol": calc.MA_TOL,    # tolerância (mA) nos limites de 4 e 20 mA (preso ao limite, sem extrapolar)
+            "trial_duration_ms": 60000,    # duração dos ensaios; fixada no início de cada ensaio; mínimo = Scan do datalogger
+            "trial_duration_unit": "s",    # unidade em que o operador digita (ms | s | min); internamente tudo é ms
+            "trial_duration_s": 60,        # derivado de trial_duration_ms (compatibilidade)
+            "cor": {"q4": None, "q20": None, "unit": "L/min"},  # faixa 4–20 mA: definida pelo operador, nunca fixa no código
+            "comm": {"protocol": "http", "address": "", "user": "", "profile": "programa_atual"}}
+COLS = ["ts", "mass_g", "temp_c", "mass_status", "temp_status", "tips_total", "cor_ma", "cor_status",
+        "flow_mode", "flow_pulses", "flow_hz", "flow_pulses_total", "pulse_status"]
+# Regravar um horário que já existe (releitura do datalogger) só COMPLETA campos vazios; nunca substitui uma leitura válida.
+UPSERT_SQL = f"""INSERT INTO samples({','.join(COLS)}) VALUES({','.join('?' * len(COLS))}) ON CONFLICT(ts) DO UPDATE SET
+  mass_g=COALESCE(samples.mass_g, excluded.mass_g),
+  mass_status=CASE WHEN samples.mass_g IS NULL THEN excluded.mass_status ELSE samples.mass_status END,
+  temp_c=COALESCE(samples.temp_c, excluded.temp_c),
+  temp_status=CASE WHEN samples.temp_c IS NULL THEN excluded.temp_status ELSE samples.temp_status END,
+  tips_total=COALESCE(samples.tips_total, excluded.tips_total),
+  cor_ma=COALESCE(samples.cor_ma, excluded.cor_ma),
+  cor_status=CASE WHEN samples.cor_ma IS NULL THEN COALESCE(excluded.cor_status, samples.cor_status) ELSE samples.cor_status END,
+  flow_mode=COALESCE(samples.flow_mode, excluded.flow_mode),
+  flow_pulses=COALESCE(samples.flow_pulses, excluded.flow_pulses),
+  flow_hz=COALESCE(samples.flow_hz, excluded.flow_hz),
+  flow_pulses_total=COALESCE(samples.flow_pulses_total, excluded.flow_pulses_total),
+  pulse_status=CASE WHEN samples.flow_pulses IS NULL THEN COALESCE(excluded.pulse_status, samples.pulse_status) ELSE samples.pulse_status END"""
+LAB = {"no_comm": "Sem comunicação", "invalid": "Leitura inválida", "out_of_range": "Fora da faixa", "fail": "Falha do sinal (< 3,6 mA)",
+       "unavailable": "Canal indisponível no programa", "unconfigured": "Não configurado", "na": "Aguardando integração"}
+
+
+# ---------- logs (arquivo com rotação + terminal; nunca registra senha nem token) ----------
+def setup_logging():
+    os.makedirs(os.path.join(DATA, "logs"), exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+    if not root.handlers:
+        fh = RotatingFileHandler(os.path.join(DATA, "logs", "servidor.log"), maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        sh = logging.StreamHandler()
+        for h in (fh, sh):
+            h.setFormatter(fmt)
+            root.addHandler(h)
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)   # sem uma linha por requisição
+
+
+setup_logging()
+log = logging.getLogger("servidor")
+
+app = Flask(__name__)
+sio = SocketIO(app, async_mode="threading")
+lock = threading.Lock()
+
+
+# ---------- instância única (no Windows uma 2ª cópia subiria na mesma porta e gravaria o mesmo banco) ----------
+def single_instance(path):
+    """Tranca `path`; devolve o arquivo trancado, ou None se outra cópia do servidor já o tem."""
+    f = open(path, "a+")
+    try:
+        f.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
+def release_instance(f):
+    try:
+        f.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        f.close()
+
+
+# ---------- configuração (lida do disco uma vez; só set_config a atualiza) ----------
+def _normalize_cfg(cfg):
+    """Campos derivados: duração em ms ↔ s e fator K normalizado. Nunca inventa valor: só converte o que foi informado."""
+    ms = cfg.get("trial_duration_ms")
+    if not ms:
+        ms = int(round(float(cfg.get("trial_duration_s") or DEFAULTS["trial_duration_s"]) * 1000))
+    cfg["trial_duration_ms"] = int(ms)
+    cfg["trial_duration_s"] = ms // 1000 if ms % 1000 == 0 else ms / 1000
+    if cfg.get("flow_k_value") is None and cfg.get("flow_k_pulses_per_l"):   # configuração antiga: só o valor em pulsos/L
+        cfg["flow_k_value"], cfg["flow_k_unit"] = cfg["flow_k_pulses_per_l"], "pulsos/L"
+    cfg["flow_k_pulses_per_l"] = calc.k_to_pulses_per_l(cfg.get("flow_k_value"), cfg.get("flow_k_unit"))
+    if cfg.get("flow_method") not in FLOW_METHODS:
+        cfg["flow_method"] = "analog"
+    return cfg
+
+
+def _read_cfg():
+    cfg = copy.deepcopy(DEFAULTS)
+    if os.path.exists(CFG_PATH):
+        with open(CFG_PATH, encoding="utf-8") as f:
+            user = json.load(f)
+        cfg.update({k: v for k, v in user.items() if k not in ("comm", "cor")})
+        if "trial_duration_ms" not in user:        # configuração anterior só tinha segundos
+            cfg["trial_duration_ms"] = None
+        cfg["comm"].update({k: v for k, v in user.get("comm", {}).items() if k != "mode"})
+        cfg["cor"].update(user.get("cor", {}))
+    return _normalize_cfg(cfg)
+
+
+_cfg = _read_cfg()
+
+
+def load_cfg():
+    return _cfg
+
+
+MODE = "cr1000x"  # único modo: não existe mais geração de dados fictícios
+_comm = dict(load_cfg()["comm"])
+for _k, _env in (("address", "DATALOGGER_HOST"), ("user", "DATALOGGER_USER"), ("protocol", "DATALOGGER_PROTOCOL"), ("profile", "CR1000X_PROFILE")):
+    if os.environ.get(_env):  # variável de ambiente tem prioridade sobre o config.json
+        _comm[_k] = os.environ[_env]
+dl = make_datalogger(_comm)
+
+# ---------- banco ----------
+db = sqlite3.connect(os.path.join(DATA, f"dados_{MODE}.db"), check_same_thread=False)   # escrita: só a aquisição e os ensaios, sob `lock`
+db.executescript("""
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, mass_g REAL, temp_c REAL,
+  mass_status TEXT, temp_status TEXT, tips_total INTEGER, cor_ma REAL, cor_status TEXT);
+CREATE TABLE IF NOT EXISTS tips(ts INTEGER, src TEXT);
+CREATE INDEX IF NOT EXISTS ix_tips ON tips(ts);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);""")
+_have = {r[1] for r in db.execute("PRAGMA table_info(samples)")}
+for _col, _typ in (("cor_ma", "REAL"), ("cor_status", "TEXT"), ("flow_mode", "TEXT"), ("flow_pulses", "REAL"), ("flow_hz", "REAL"),
+                   ("flow_pulses_total", "INTEGER"), ("pulse_status", "TEXT")):
+    if _col not in _have:  # bancos antigos ganham as colunas novas sem perder dados
+        db.execute(f"ALTER TABLE samples ADD COLUMN {_col} {_typ}")
+if "src" not in {r[1] for r in db.execute("PRAGMA table_info(tips)")}:  # banco antigo: ganha a chave única do evento
+    db.execute("ALTER TABLE tips ADD COLUMN src TEXT")
+db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_tips_src ON tips(src)")  # evento vindo do datalogger nunca entra duas vezes
+db.commit()
+
+
+_DB_PATH = os.path.join(DATA, f"dados_{MODE}.db")
+_rdb = threading.local()
+
+
+def q(sql, a=()):
+    """Leitura: conexão própria por thread (WAL: leitores não bloqueiam a aquisição nem esperam pelo `lock`)."""
+    con = getattr(_rdb, "con", None)
+    if con is None:
+        con = _rdb.con = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    return con.execute(sql, a).fetchall()
+
+
+def w(sql, a=()):
+    with lock:
+        db.execute(sql, a)
+        db.commit()
+
+
+def count_since():
+    r = q("SELECT v FROM meta WHERE k='count_since'")
+    return int(r[0][0]) if r else 0
+
+
+def tips_total():
+    return q("SELECT COUNT(*) FROM tips WHERE ts>=?", (count_since(),))[0][0]
+
+
+def last_tip():
+    return q("SELECT MAX(ts) FROM tips")[0][0]
+
+
+def latest_sample_ts():
+    return q("SELECT MAX(ts) FROM samples")[0][0]
+
+
+state = {"latest": None, "last_rx": None, "trial_id": None}
+trials = Trials(db, lock, load_cfg, latest_sample_ts, scan_ms=dl.scan_ms)
+
+
+# ---------- Medidor de Vazão: método (analógico | pulsos) escolhido no servidor, cálculo sempre a partir do dado bruto ----------
+def lin(ma, cor):
+    """Relação linear entre 4 e 20 mA e a faixa configurada. None se a faixa não está configurada."""
+    if ma is None or cor["q4"] is None or cor["q20"] is None:
+        return None
+    return cor["q4"] + (ma - 4) / 16 * (cor["q20"] - cor["q4"])
+
+
+_MA_STATE = {"ok": "ok", "under": "out_of_range", "over": "out_of_range", "fail": "fail", "none": "invalid"}
+
+
+def cor_class(r, tol=None):
+    """Estado GRAVADO do canal analógico: o mA original é sempre preservado; fora de 4–20 mA fica marcado, não descartado."""
+    if r.cor_status in (None, "no_comm", "invalid"):
+        return r.cor_status
+    return _MA_STATE[calc.classify_ma(r.cor_ma, tol if tol is not None else load_cfg()["flow_ma_tol"])[0]]
+
+
+def flow_eval(cfg, channels, ma, cor_status, pulses, pulse_status, dt_s=None, has_flow=True):
+    """Vazão instantânea pelo MÉTODO configurado, a partir do dado bruto de UMA amostra.
+
+    Devolve {method (solicitado), active (método realmente usado, só quando houve cálculo), channels, state, reason, value_l_min}.
+    Estados: ok | na (programa sem medidor) | unavailable (programa sem o canal do método) | no_comm | invalid | fail (< 3,6 mA)
+             | out_of_range | unconfigured (K, faixa ou densidade ausentes). Erro nunca vira zero.
+    """
+    method = cfg.get("flow_method") if cfg.get("flow_method") in FLOW_METHODS else "analog"
+    channels = channels or {"analog": False, "pulse": False}
+    out = {"method": method, "active": None, "channels": channels, "state": "na", "reason": None, "value_l_min": None}
+    if not has_flow:
+        out["reason"] = "o programa do datalogger não fornece o medidor de vazão"
+        return out
+    if not channels.get(method):
+        out["state"] = "unavailable"
+        out["reason"] = ("o programa em execução não fornece o canal de pulsos (P2): carregue o Pluviometria_v4_vazao_pulsos.CR1X"
+                         if method == "pulse" else "o programa em execução não fornece o canal analógico (RG1)")
+        return out
+    if method == "pulse":
+        if pulse_status in (None, "no_comm"):
+            out["state"] = "no_comm"
+            return out
+        if pulse_status != "ok":
+            out["state"] = "invalid"
+            return out
+        k = cfg.get("flow_k_pulses_per_l")
+        if not k:
+            out["state"], out["reason"] = "unconfigured", "informe o fator K (pulsos por volume) do medidor"
+            return out
+        v = calc.pulse_flow_l_min(pulses, dt_s if dt_s else dl.scan_ms / 1000.0, k)
+    else:
+        if cor_status in (None, "no_comm"):
+            out["state"] = "no_comm"
+            return out
+        if cor_status == "invalid":
+            out["state"] = "invalid"
+            return out
+        cls, mac = calc.classify_ma(ma, cfg.get("flow_ma_tol", calc.MA_TOL))
+        if cls == "fail":
+            out["state"], out["reason"] = "fail", "sinal abaixo de 3,6 mA: falha do transmissor ou do laço (NAMUR NE 43)"
+            return out
+        if cls in ("under", "over"):
+            out["state"], out["reason"] = "out_of_range", f"{ma:.3f} mA fora de 4–20 mA"
+            return out
+        if cls == "none":
+            out["state"] = "invalid"
+            return out
+        cor = cfg["cor"]
+        if cor["q4"] is None or cor["q20"] is None:
+            out["state"], out["reason"] = "unconfigured", "informe a vazão em 4 mA e em 20 mA"
+            return out
+        v = calc.flow_to_l_min(lin(mac, cor), cor["unit"], cfg["density_g_cm3"])
+        if v is None:
+            out["state"], out["reason"] = "unconfigured", "informe a densidade da água (faixa em unidade mássica)"
+            return out
+    if v is None:
+        out["state"], out["reason"] = "unconfigured", "não foi possível calcular a vazão"
+        return out
+    out["state"], out["active"], out["value_l_min"] = "ok", method, v
+    return out
+
+
+def flow_reading(r, cfg):
+    return flow_eval(cfg, r.flow_channels, r.cor_ma, r.cor_status, r.flow_pulses, r.pulse_status, dl.scan_ms / 1000.0, dl.has_flow)
+
+
+def flow_row(d, cfg):
+    """(vazão em L/min, estado) de uma linha gravada (dict com as colunas de COLS). Os canais são os que a linha tem."""
+    ch = {"analog": d.get("cor_status") is not None, "pulse": d.get("pulse_status") is not None}
+    cs = "ok" if d.get("cor_ma") is not None else d.get("cor_status")
+    fe = flow_eval(cfg, ch, d.get("cor_ma"), cs, d.get("flow_pulses"), d.get("pulse_status"), dl.scan_ms / 1000.0, dl.has_flow or any(ch.values()))
+    return fe["value_l_min"], fe["state"]
+
+
+def flow_stats(where, a, cfg):
+    """Média/mín/máx da vazão (L/min) no período pelo método configurado. Pulso e mA são lineares: média da vazão = vazão da média."""
+    an = q(f"SELECT AVG(cor_ma),MIN(cor_ma),MAX(cor_ma),COUNT(cor_ma) FROM samples WHERE {where} AND cor_status='ok'", a)[0]
+    n_out = q(f"SELECT COUNT(*) FROM samples WHERE {where} AND cor_status IN ('out_of_range','fail')", a)[0][0]
+    pu = q(f"SELECT AVG(flow_hz),MIN(flow_hz),MAX(flow_hz),COUNT(flow_pulses),SUM(flow_pulses) FROM samples WHERE {where} AND pulse_status='ok'", a)[0]
+    f = lambda v: None if v is None else round(v, 3)
+    method = cfg.get("flow_method") or "analog"
+    out = {"ma": {"avg": f(an[0]), "min": f(an[1]), "max": f(an[2]), "n": an[3], "n_out": n_out}, "flow": None, "pulses": None,
+           "mode": method, "mixed": False}
+    if pu[3]:
+        out["pulses"] = {"avg_hz": f(pu[0]), "n": pu[3], "sum": int(pu[4] or 0)}
+    k, cor = cfg["flow_k_pulses_per_l"], cfg["cor"]
+    if method == "pulse" and k and pu[3]:
+        out["flow"] = {"avg": f(pu[0] / k * 60), "min": f(pu[1] / k * 60), "max": f(pu[2] / k * 60), "unit": "L/min"}
+    elif method == "analog" and an[3] and cor["q4"] is not None and cor["q20"] is not None:
+        vals = [calc.flow_to_l_min(lin(m, cor), cor["unit"], cfg["density_g_cm3"]) for m in (an[0], an[1], an[2])]
+        if None not in vals:
+            lo, hi = sorted([vals[1], vals[2]])
+            out["flow"] = {"avg": f(vals[0]), "min": f(lo), "max": f(hi), "unit": "L/min"}
+    return out
+
+
+def stats(where, a, cfg=None):
+    """Média, mínimo, máximo e nº de leituras válidas (valores nulos ficam de fora). Média do PERÍODO inteiro."""
+    cfg = cfg or load_cfg()
+    r = q(f"SELECT AVG(mass_g),MIN(mass_g),MAX(mass_g),COUNT(mass_g),AVG(temp_c),MIN(temp_c),MAX(temp_c),COUNT(temp_c) "
+          f"FROM samples WHERE {where}", a)[0]
+    f = lambda v: None if v is None else round(v, 3)
+    return {"mass": {"avg": f(r[0]), "min": f(r[1]), "max": f(r[2]), "n": r[3]},
+            "temp": {"avg": f(r[4]), "min": f(r[5]), "max": f(r[6]), "n": r[7]},
+            "cor": flow_stats(where, a, cfg)}
+
+
+def period_grav(fr, to, cfg=None):
+    """Referência gravimétrica do período [fr, to): 1ª e última massa válida e basculadas em (t0, t1], a mesma regra dos ensaios."""
+    cfg = cfg or load_cfg()
+    sql = "SELECT ts,mass_g FROM samples WHERE ts>=? AND ts<? AND mass_g IS NOT NULL ORDER BY ts {} LIMIT 1"
+    a, b = q(sql.format("ASC"), (fr, to)), q(sql.format("DESC"), (fr, to))
+    if not a or a[0][0] == b[0][0]:
+        return calc.gravimetric(None, None, None, None, cfg["density_g_cm3"], cfg["catch_area_cm2"])
+    (t0, m0), (t1, m1), res = a[0], b[0], cfg["tip_resolution_mm"]
+    n = q("SELECT COUNT(*) FROM tips WHERE ts>? AND ts<=?", (t0, t1))[0][0]
+    return calc.gravimetric(m0, m1, t0, t1, cfg["density_g_cm3"], cfg["catch_area_cm2"], n if res else None, res)
+
+
+# ---------- aquisição ----------
+diag = {"polls": 0, "errors": 0, "consec_errors": 0, "poll_ms": deque(maxlen=300), "lat_ms": deque(maxlen=300),
+        "rows": 0, "out_of_order": 0, "stalls": 0, "retries": 0, "last_ts": None, "live": True, "started": int(time.time() * 1000), "health": {}}
+link = {"last_try": None, "last_ok": None, "error": None}  # estado real da comunicação com o datalogger
+
+
+def _health():
+    diag["health"] = dl.health()
+    off = diag["health"]["clock_offset_s"]
+    if off is not None and abs(off) > 2:
+        log.warning("Relógio do datalogger difere do PC em %s s", off)
+
+
+def pct(v, p):
+    s = sorted(v)
+    return s[min(len(s) - 1, int(len(s) * p))] if s else None
+
+
+def link_view():
+    """Conectado = a última consulta funcionou há pouco. Nunca presumido: sem consulta bem-sucedida, fica desconectado."""
+    ok, now = link["last_ok"], time.time() * 1000
+    fresh = ok is not None and link["error"] is None and now - ok < max(10, 5 * SAMPLE_PERIOD) * 1000
+    rx = state["last_rx"]
+    lat = list(diag["lat_ms"])
+    return {"connected": fresh, "last_try_ts": link["last_try"], "last_ok_ts": ok, "error": link["error"],
+            "gaps": dl.gaps, "restarts": dl.restarts, "flow_integrated": dl.has_flow, "flow_channels": dl.channels(),
+            "data_fresh": rx is not None and now - rx < 10_000,        # chegou amostra NOVA nos últimos 10 s
+            "last_rx_ts": rx, "latency_s": round(pct(lat, .5) / 1000, 1) if lat else None,
+            "clock_skew_s": diag["health"].get("clock_offset_s"), "scan_ms": dl.scan_ms}   # desvio real do relógio (ClockCheck), não a latência
+
+
+def store_batch(batch, now):
+    """Grava um lote de Readings numa única transação. Devolve (linhas gravadas, eventos realmente novos).
+    As basculadas entram ANTES das amostras, para que `tips_total` de cada amostra já as inclua.
+    Horário repetido (releitura) só completa campos vazios (UPSERT_SQL): nunca regride uma leitura válida."""
+    events, rows, tol = [], [], load_cfg()["flow_ma_tol"]
+    with lock:
+        for r in batch:
+            for item in r.tips:  # cada basculada é um evento com id próprio; o INSERT OR IGNORE recusa repetidos pela chave
+                tts, key = item if isinstance(item, tuple) else (item, None)
+                cur = db.execute("INSERT OR IGNORE INTO tips(ts,src) VALUES(?,?)", (tts, key))
+                if cur.rowcount:
+                    events.append({"id": cur.lastrowid, "ts": tts})
+        since = count_since()
+        for r in batch:
+            if not r.sample:
+                continue
+            ts = r.ts or now
+            n = db.execute("SELECT COUNT(*) FROM tips WHERE ts>=? AND ts<=?", (since, ts)).fetchone()[0]
+            full = (ts, r.mass_g, r.temp_c, r.mass_status, r.temp_status, n, r.cor_ma, cor_class(r, tol), r.flow_mode, r.flow_pulses, r.flow_hz,
+                    r.flow_pulses_total, r.pulse_status)
+            db.execute(UPSERT_SQL, full)
+            rows.append(full)
+        db.commit()
+    return rows, events
+
+
+def emit_trial():
+    st = trials.status()
+    sio.emit("trial", st)
+    return st
+
+
+def _emit_latest(r, full, t_rx, events):
+    fe = flow_reading(r, load_cfg())
+    s = dict(zip(COLS, full), last_tip_ts=last_tip(), new_tips=events, flow=fe, flow_lmin=fe["value_l_min"], flow_state=fe["state"],
+             flow_channels=r.flow_channels, rx_ts=t_rx)
+    state["latest"] = s
+    sio.emit("sample", s)
+
+
+def poll_once():
+    """UM ciclo de aquisição: consulta o datalogger, grava, emite para a tela e avalia o ensaio. Devolve o nº de linhas novas.
+    Falha de comunicação: nada é gravado (o datalogger guarda os dados e eles são recuperados na volta); fica em link['error']."""
+    t0 = time.time()
+    now = int(t0 * 1000)
+    link["last_try"] = now
+    diag["polls"] += 1
+    try:
+        if not _comm.get("address"):
+            raise RuntimeError("Endereço do datalogger não configurado (DATALOGGER_HOST ou config.json).")
+        got = dl.read()
+        link["last_ok"], link["error"] = now, None
+        diag["consec_errors"] = 0
+        diag["poll_ms"].append((time.time() - t0) * 1000)
+    except Exception as e:
+        diag["errors"] += 1
+        diag["consec_errors"] += 1
+        msg = (str(e) or e.__class__.__name__)[:200]
+        if link["error"] != msg:
+            log.warning("Falha na leitura do datalogger: %s", msg)
+        link["error"] = msg
+        try:
+            trials.tick(int(time.time() * 1000))
+        except Exception:
+            log.exception("Falha ao avaliar o ensaio")
+        return 0
+    batch = got if isinstance(got, list) else [got]
+    diag["live"] = len(batch) <= 2
+    rows, events = store_batch(batch, now)
+    for full in rows:
+        diag["rows"] += 1
+        if diag["last_ts"] is not None and full[0] <= diag["last_ts"]:
+            diag["out_of_order"] += 1
+            if diag["out_of_order"] in (1, 10, 100) or diag["out_of_order"] % 1000 == 0:   # não inunda o log numa releitura
+                log.warning("Amostra fora de ordem ou repetida: ts=%d (última=%d); %d ocorrências", full[0], diag["last_ts"], diag["out_of_order"])
+        diag["last_ts"] = max(full[0], diag["last_ts"] or 0)
+    if rows:   # a tela recebe ANTES de gravar o cursor: nada do que acontece no disco atrasa a exibição
+        t_rx = int(time.time() * 1000)
+        diag["lat_ms"].append(t_rx - rows[-1][0])   # latência real (PC − carimbo do datalogger), de TODO ciclo com dados
+        state["last_rx"] = t_rx
+        _emit_latest([r for r in batch if r.sample][-1], rows[-1], t_rx, events)
+    if len(batch) > 2 or time.time() - t0 > 1.5:   # ciclo lento ou rajada: fica registrado para diagnóstico
+        diag["stalls"] += 1
+        if diag["stalls"] in (1, 10, 100) or diag["stalls"] % 1000 == 0:
+            log.warning("Ciclo de %.2f s com %d leituras (recuperação/atraso); %d ocorrências", time.time() - t0, len(batch), diag["stalls"])
+    dl.ack()  # o cursor só avança depois de gravado: nada se perde se o servidor cair no meio
+    try:
+        fin = trials.tick(int(time.time() * 1000))
+        if fin or state["trial_id"] or trials.has_running():   # status() calcula o parcial: só quando há ensaio
+            st = trials.status()
+            state["trial_id"] = st["running"]["id"] if st["running"] else None
+            sio.emit("trial", st)
+    except Exception:
+        log.exception("Falha ao avaliar o ensaio")
+    return len(rows)
+
+
+def acquire():
+    """Laço de aquisição com agenda por HORÁRIO ABSOLUTO: a consulta sai SAMPLE_PHASE s depois de cada múltiplo de SAMPLE_PERIOD
+    (o Scan de 1 s do datalogger já gravou as tabelas), sem acumular deriva entre ciclos. Se a gravação ainda não chegou, nova
+    tentativa curta (RETRY_S, até 3 vezes). Em falha de comunicação recua progressivamente (até 10 s). A thread nunca morre."""
+    summary_t, health_t, t_next = time.time(), 0.0, None
+    while True:
+        try:
+            now = time.time()
+            if t_next is None or t_next < now - SAMPLE_PERIOD:   # primeira volta, ou atraso grande (recuperação): realinha
+                t_next = (math.floor(now / SAMPLE_PERIOD) + 1) * SAMPLE_PERIOD + SAMPLE_PHASE
+            if t_next > now:
+                sio.sleep(t_next - now)
+            n = poll_once()
+            if n == 0 and link["error"] is None and link["last_ok"] is not None:
+                for _ in range(3):
+                    sio.sleep(RETRY_S)
+                    diag["retries"] += 1
+                    if poll_once() or link["error"]:
+                        break
+            if link["error"]:   # recuo progressivo (até 10 s): não martela um datalogger/rede que já está com problema
+                sio.sleep(min(10.0, SAMPLE_PERIOD * 2 ** min(diag["consec_errors"], 5)))
+                t_next = None
+            else:
+                t_next += SAMPLE_PERIOD
+            if time.time() - health_t > 3600:   # diagnóstico leve (2 consultas) uma vez por hora, em outra thread: nunca atrasa a aquisição
+                health_t = time.time()
+                sio.start_background_task(_health)
+            if time.time() - summary_t > 60:   # um resumo por minuto: suficiente para diagnosticar sem inflar o log
+                summary_t = time.time()
+                lat, pm = list(diag["lat_ms"]), list(diag["poll_ms"])
+                log.info("resumo: consultas=%d erros=%d amostras=%d retentativas=%d lat(PC-datalogger) p50=%s p95=%s ms consulta p50=%s p95=%s ms "
+                         "lacunas=%d reinicios=%d sem-correspondencia=%s", diag["polls"], diag["errors"], diag["rows"], diag["retries"], pct(lat, .5),
+                         pct(lat, .95), pct(pm, .5), pct(pm, .95), dl.gaps, dl.restarts, dl.join_miss)
+        except Exception:
+            log.exception("Erro inesperado no ciclo de aquisição; continuando")
+            sio.sleep(SAMPLE_PERIOD)
+            t_next = None
+
+
+# ---------- segurança ----------
+def guarded(f):
+    """Operações de escrita: JSON obrigatório (barra POST de formulário de outro site) e token, se DASHBOARD_TOKEN estiver definido."""
+    @wraps(f)
+    def inner(*a, **k):
+        if request.mimetype != "application/json":
+            return jsonify(error="Use Content-Type: application/json."), 415
+        if DASHBOARD_TOKEN and not hmac.compare_digest(request.headers.get("X-Dashboard-Token", "").encode(), DASHBOARD_TOKEN.encode()):
+            log.warning("Escrita negada em %s (token ausente ou incorreto)", request.path)   # o token informado nunca é registrado
+            return jsonify(error="Token de acesso inválido."), 401
+        return f(*a, **k)
+    return inner
+
+
+# ---------- API ----------
+def rng():
+    to = int(float(request.args.get("to") or time.time() * 1000))
+    return int(float(request.args.get("from") or to - 900000)), to
+
+
+@app.get("/")
+def index():
+    return render_template("index.html")
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return app.send_static_file("img/favicon.ico")
+
+
+@app.get("/relatorio/<tid>")
+def relatorio(tid):
+    """Relatório imprimível: página estática que lê /api/trials/<id> no navegador (nenhum processamento no servidor)."""
+    return render_template("relatorio.html")
+
+
+@app.get("/api/summary")
+def summary():
+    fr, to = rng()
+    cfg = load_cfg()
+    res = cfg["tip_resolution_mm"]
+    smp = [r[0] for r in q("SELECT ts FROM samples WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))]
+    tps = [r[0] for r in q("SELECT ts FROM tips WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))]
+    period = calc.precip_period(tps, smp, fr, to, res) | {"from": fr, "to": to}
+    return jsonify(latest=state["latest"], link=link_view(), now=int(time.time() * 1000), mode=MODE, period=period,
+                   tips_total=tips_total(), count_since=count_since(), last_tip_ts=last_tip(),
+                   stats=stats("ts>=? AND ts<?", [fr, to], cfg), grav=period_grav(fr, to, cfg), resolution=res, area_cm2=cfg["catch_area_cm2"])
+
+
+@app.get("/api/series")
+def series():
+    fr, to = rng()
+    cfg = load_cfg()
+    rows = q("SELECT ts,mass_g,temp_c,cor_ma,cor_status,flow_mode,flow_hz,flow_pulses,pulse_status FROM samples WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))
+    ts = [r[0] for r in rows]
+    fl = [flow_row({"cor_ma": r[3], "cor_status": r[4], "flow_pulses": r[7], "pulse_status": r[8]}, cfg)[0] for r in rows]
+    cols = {"mass": [r[1] for r in rows], "temp": [r[2] for r in rows], "cor_ma": [r[3] if r[4] == "ok" else None for r in rows], "flow": fl,
+            "hz": [r[6] if r[8] == "ok" else None for r in rows]}
+    step = len(ts) // 600 + 1
+    out = {"t": [], **{k: [] for k in cols}}
+    for i in range(0, len(ts), step):   # no máx. ~600 pontos: cada ponto = média das leituras válidas do trecho
+        ch = range(i, min(i + step, len(ts)))
+        out["t"].append(ts[ch[-1]])
+        for k, v in cols.items():
+            vals = [v[j] for j in ch if v[j] is not None]
+            out[k].append(round(sum(vals) / len(vals), 3) if vals else None)
+    out["flow_mode"] = cfg["flow_method"]
+    out["stats"] = stats("ts>=? AND ts<?", [fr, to], cfg)
+    out["tips"] = [r[0] for r in q("SELECT ts FROM tips WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))]
+    return jsonify(out)
+
+
+@app.get("/api/tips")
+def tips_api():
+    fr, to = rng()
+    lo, lim = max(fr, count_since()), min(int(request.args.get("limit", 50)), 1000)
+    rows = tip_rows("t.ts>=? AND t.ts<?", (lo, to), "DESC", lim)
+    total = q("SELECT COUNT(*) FROM tips WHERE ts>=? AND ts<?", (lo, to))[0][0]
+    return jsonify(total=total, events=rows)
+
+
+TIP_SETTLE_MS = 3000      # a água leva ~1–2 s para cair e a balança estabilizar: a massa da basculada é lida 3 s depois dela
+TIP_PREV_MAX_MS = 600000  # basculada anterior há mais de 10 min (ou massa menor): a referência não vale mais (tara, esvaziamento)
+
+
+def tip_rows(where, a, order, lim=None):
+    """Basculadas com a massa da balança após a basculada e a massa ejetada desde a anterior (Δm).
+
+    Massa de cada basculada = amostra em ts + 3 s, se a próxima basculada ainda não aconteceu; senão a do próprio segundo
+    (`settled` diz qual foi). Δm usa a basculada anterior real (mesmo fora da página); None se faltar massa, se a anterior
+    for antiga demais ou se a massa diminuiu."""
+    tips = q(f"SELECT t.rowid, t.ts FROM tips t WHERE {where} ORDER BY t.ts {order}, t.rowid {order}" + (f" LIMIT {int(lim)}" if lim else ""), a)
+    if not tips:
+        return []
+    if order == "DESC":
+        tips = tips[::-1]                       # trabalha em ordem cronológica
+    prev = q("SELECT rowid, ts FROM tips WHERE ts < ? OR (ts = ? AND rowid < ?) ORDER BY ts DESC, rowid DESC LIMIT 1", (tips[0][1], tips[0][1], tips[0][0]))
+    seq = (prev[0:1] or []) + tips
+    nxt = q("SELECT ts FROM tips WHERE ts > ? OR (ts = ? AND rowid > ?) ORDER BY ts, rowid LIMIT 1", (tips[-1][1], tips[-1][1], tips[-1][0]))
+    latest = latest_sample_ts() or 0
+    want = []
+    for i, (_, ts) in enumerate(seq):
+        after = seq[i + 1][1] if i + 1 < len(seq) else (nxt[0][0] if nxt else None)
+        ok = ts + TIP_SETTLE_MS <= latest and (after is None or after > ts + TIP_SETTLE_MS)
+        want.append((ts + TIP_SETTLE_MS, True) if ok else (ts, False))
+    mass = dict(q(f"SELECT ts, mass_g FROM samples WHERE ts IN ({','.join('?' * len(want))})", [w[0] for w in want])) if want else {}
+    out, pm, pts = [], None, None
+    for (rid, ts), (mts, settled) in zip(seq, want):
+        m = mass.get(mts)
+        dm = None if m is None or pm is None or ts - pts > TIP_PREV_MAX_MS or m < pm else round(m - pm, 3)
+        out.append({"id": rid, "ts": ts, "mass_g": m, "settled": settled, "dm_g": dm})
+        pm, pts = m, ts
+    out = out[1:] if prev else out              # a anterior só serviu de referência
+    return out[::-1] if order == "DESC" else out
+
+
+def hist_where():
+    fr, to = rng()
+    sensor, st = request.args.get("sensor", "all"), request.args.get("state", "all")
+    where, a = ["ts>=? AND ts<?"], [fr, to]
+    cols = {"mass": ["mass_status"], "temp": ["temp_status"], "cor": ["cor_status", "pulse_status"], "tips": []}.get(
+        sensor, ["mass_status", "temp_status", "cor_status"])
+    if cols and st == "ok":
+        where.append(" AND ".join(f"COALESCE({c},'ok')='ok'" for c in cols))
+    elif cols and st in ("no_comm", "invalid", "out_of_range", "fail"):
+        where.append("(" + " OR ".join(f"{c}='{st}'" for c in cols) + ")")
+    return " AND ".join(where), a
+
+
+@app.get("/api/history")
+def history():
+    where, a = hist_where()
+    lim, off = min(int(request.args.get("limit", 50)), 1000), int(request.args.get("offset", 0))
+    total = q(f"SELECT COUNT(*) FROM samples WHERE {where}", a)[0][0]
+    rows = q(f"SELECT {','.join(COLS)} FROM samples WHERE {where} ORDER BY ts DESC LIMIT ? OFFSET ?", a + [lim, off])
+    cfg, out = load_cfg(), []
+    for r in rows:
+        d = dict(zip(COLS, r))
+        d["flow_lmin"], d["flow_state"] = flow_row(d, cfg)
+        out.append(d)
+    return jsonify(total=total, rows=out, stats=stats(where, a, cfg), resolution=cfg["tip_resolution_mm"])
+
+
+def estado(ms, ts, cs, ps=None):
+    parts = [f"{LAB[s]} ({n})" for s, n in ((ms, "balança"), (ts, "termopar"), (cs, "medidor de vazão, 4–20 mA"), (ps, "medidor de vazão, pulsos"))
+             if s not in ("ok", None)]
+    return "; ".join(parts) or "Válida"
+
+
+def export_table():
+    """Cabeçalho + linhas. Valores originais (massa em g, temperatura em °C, sinal em mA, pulsos brutos), data/hora e unidades."""
+    where, a = hist_where()
+    sensor, cfg = request.args.get("sensor", "all"), load_cfg()
+    res = cfg["tip_resolution_mm"]
+    rows = q(f"SELECT {','.join(COLS)} FROM samples WHERE {where} ORDER BY ts LIMIT 200000", a)
+    m_on, t_on, c_on, p_on = (sensor in ("all", "mass"), sensor in ("all", "temp"), sensor in ("all", "cor"),
+                              sensor in ("all", "tips"))
+    head = ["Data e hora"] + (["Massa (g)"] if m_on else []) + (["Temperatura (°C)"] if t_on else []) \
+        + (["Medidor de Vazão (mA)", "Pulsos (contagem no Scan)", "Pulsos acumulados (datalogger)", "Frequência (Hz)", f"Vazão (L/min, método {cfg['flow_method']})"] if c_on else []) \
+        + (["Basculadas (total desde zerar)", "Precipitação acumulada desde zerar (mm)"] if p_on else []) + ["Estado"]
+    out = []
+    for r in rows:
+        d = dict(zip(COLS, r))
+        out.append([datetime.fromtimestamp(d["ts"] / 1000)] + ([d["mass_g"]] if m_on else []) + ([d["temp_c"]] if t_on else [])
+                   + ([d["cor_ma"], d["flow_pulses"], d["flow_pulses_total"], d["flow_hz"], flow_row(d, cfg)[0]] if c_on else [])
+                   + ([d["tips_total"], round(d["tips_total"] * res, 3) if res else None] if p_on else [])
+                   + [estado(d["mass_status"] if m_on else "ok", d["temp_status"] if t_on else "ok", d["cor_status"] if c_on else "ok",
+                             d["pulse_status"] if c_on else None)])
+    return head, out
+
+
+def csv_response(head, rows, name):
+    buf = io.StringIO()
+    wr = csv.writer(buf, delimiter=";")  # ";" e vírgula decimal: abre direto no Excel em pt-BR
+    wr.writerow(head)
+    for r in rows:
+        wr.writerow([r[0].strftime("%d/%m/%Y %H:%M:%S") if isinstance(r[0], datetime) else r[0]] +
+                    ["" if v is None else str(v).replace(".", ",") if isinstance(v, float) else v for v in r[1:]])
+    return Response("﻿" + buf.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename={name}"})
+
+
+@app.get("/export.csv")
+def export_csv():
+    head, rows = export_table()
+    return csv_response(head, rows, "medicoes.csv")
+
+
+@app.get("/export.xlsx")
+def export_xlsx():
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    head, rows = export_table()
+    wb = Workbook(write_only=True)  # escrita em fluxo: tempo linear (o modo comum ficava quadrático com milhares de linhas)
+    ws = wb.create_sheet("Medições")
+    ws.column_dimensions["A"].width = 22
+    ws.append(head)
+    for r in rows:
+        c = WriteOnlyCell(ws, value=r[0])
+        c.number_format = "DD/MM/YYYY HH:MM:SS"
+        ws.append([c] + r[1:])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return Response(buf.getvalue(), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename=medicoes.xlsx"})
+
+
+@app.get("/export-eventos.csv")
+def export_events():
+    fr, to = rng()
+    rows = tip_rows("t.ts>=? AND t.ts<?", (max(fr, count_since()), to), "ASC")
+    buf = io.StringIO()
+    wr = csv.writer(buf, delimiter=";")
+    wr.writerow(["Evento (id)", "Data e hora", "Intervalo desde a anterior (s)", "Massa 3 s após a basculada (g)", "Massa ejetada desde a anterior (g)", "Massa lida 3 s depois?"])
+    d = lambda v: "" if v is None else str(v).replace(".", ",")
+    prev = None
+    for e in rows:
+        wr.writerow([e["id"], datetime.fromtimestamp(e["ts"] / 1000).strftime("%d/%m/%Y %H:%M:%S.%f")[:-3],
+                     "" if prev is None else d(round((e["ts"] - prev) / 1000, 3)), d(e["mass_g"]), d(e["dm_g"]), "sim" if e["settled"] else "nao"])
+        prev = e["ts"]
+    return Response("﻿" + buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=eventos-basculamento.csv"})
+
+
+# ---------- medidor de vazão: estado e método ----------
+def flow_view():
+    """Estado atual do medidor: método solicitado × ativo, canais do programa, dado bruto, valor e motivo."""
+    cfg, s = load_cfg(), state["latest"] or {}
+    if s:   # reavalia a última amostra com a configuração ATUAL (método/K podem ter mudado depois dela)
+        fe = flow_eval(cfg, s.get("flow_channels") or dl.channels(), s.get("cor_ma"), "ok" if s.get("cor_ma") is not None else s.get("cor_status"),
+                       s.get("flow_pulses"), s.get("pulse_status"), dl.scan_ms / 1000.0, dl.has_flow)
+    else:
+        fe = flow_eval(cfg, dl.channels(), None, None, None, None, dl.scan_ms / 1000.0, dl.has_flow)
+    return fe | {"raw": {"ma": s.get("cor_ma"), "pulses": s.get("flow_pulses"), "pulses_total": s.get("flow_pulses_total"), "hz": s.get("flow_hz")},
+                 "k": {"value": cfg["flow_k_value"], "unit": cfg["flow_k_unit"], "pulses_per_l": cfg["flow_k_pulses_per_l"]},
+                 "ma_tol": cfg["flow_ma_tol"], "range": cfg["cor"], "scan_ms": dl.scan_ms, "ts": s.get("ts"),
+                 "trial_running": trials.has_running(), "state_label": LAB.get(fe["state"], "")}
+
+
+@app.get("/api/flow")
+def flow_api():
+    return jsonify(flow_view())
+
+
+@app.post("/api/flow/method")
+@guarded
+def flow_method():
+    """Troca o método (analógico | pulsos). Recusada durante um ensaio e quando o programa em execução não tem o canal.
+    Nada é escrito no datalogger: ele mede os dois canais sempre; a escolha vale para o cálculo no servidor."""
+    m = (request.get_json(silent=True) or {}).get("method")
+    if m not in FLOW_METHODS:
+        return jsonify(error="Método inválido: use 'analog' ou 'pulse'."), 400
+    if trials.has_running():
+        return jsonify(error="Há um ensaio em andamento: o método não pode ser trocado até ele terminar."), 409
+    ch = dl.channels()
+    if dl.has_flow and dl.fields.get((dl.profile.get("flow") or {}).get("table")) and not ch.get(m):
+        return jsonify(error=("O programa em execução no CR1000Xe não fornece o canal de pulsos (P2): carregue o Pluviometria_v4_vazao_pulsos.CR1X."
+                              if m == "pulse" else "O programa em execução não fornece o canal analógico (RG1).")), 400
+    cfg = copy.deepcopy(load_cfg())
+    cfg["flow_method"] = m
+    _save_cfg(cfg)
+    log.info("método do medidor de vazão: %s", m)
+    s = state["latest"]
+    if s:   # a última amostra é reavaliada com o método novo (dado bruto já gravado); o 'ativo' só muda quando o cálculo acontece
+        fe = flow_view()
+        s.update(flow={k: fe[k] for k in ("method", "active", "channels", "state", "reason", "value_l_min")}, flow_lmin=fe["value_l_min"], flow_state=fe["state"])
+        sio.emit("sample", s)
+    return jsonify(flow_view() | {"config": public_cfg(cfg)})
+
+
+# ---------- ensaios ----------
+def _trial_err(e):
+    return jsonify(error=e.msg), e.status
+
+
+@app.get("/api/trials")
+def trials_api():
+    return jsonify(trials.status() | {"history": trials.list(30)})
+
+
+@app.get("/api/trials/<tid>")
+def trial_get(tid):
+    t = trials.get(tid)
+    return (jsonify(t), 200) if t else (jsonify(error="Ensaio não encontrado."), 404)
+
+
+@app.post("/api/trials/start")
+@guarded
+def trial_start():
+    kind = (request.get_json(silent=True) or {}).get("kind")
+    lv = link_view()
+    fe = flow_view() if kind == "flow" else None
+    if fe and fe["state"] in ("na", "unavailable"):
+        return jsonify(error="Ensaio do medidor de vazão: " + (fe["reason"] or LAB[fe["state"]])), 409
+    try:
+        t = trials.start(kind, lv["connected"] and lv["data_fresh"])
+    except TrialError as e:
+        return _trial_err(e)
+    emit_trial()
+    return jsonify(t)
+
+
+@app.post("/api/trials/stop")
+@guarded
+def trial_stop():
+    try:
+        t = trials.stop()
+    except TrialError as e:
+        return _trial_err(e)
+    emit_trial()
+    return jsonify(t)
+
+
+@app.get("/api/trials/<tid>/raw.csv")
+def trial_raw(tid):
+    t = trials.get(tid)
+    if not t:
+        return jsonify(error="Ensaio não encontrado."), 404
+    s, _ = trials.raw(tid)
+    cfg = t["cfg"]
+    head = ["Data e hora (datalogger)", "Massa (g)", "Temperatura (°C)", "Estado da massa", "Estado da temperatura",
+            "Medidor de Vazão (mA)", "Estado 4–20 mA", "Modo (datalogger)", "Pulsos (contagem no Scan)", "Frequência (Hz)",
+            "Pulsos acumulados (datalogger)", "Estado pulsos", f"Vazão (L/min, método {cfg.get('method', 'analog')})"]
+    rows = []
+    for r in s:
+        d = dict(zip(trials.SCOLS_LIST, r))
+        rows.append([datetime.fromtimestamp(d["ts"] / 1000), d["mass_g"], d["temp_c"], d["mass_status"], d["temp_status"], d["cor_ma"], d["cor_status"],
+                     d["flow_mode"], d["flow_pulses"], d["flow_hz"], d["flow_pulses_total"], d["pulse_status"], trials.flow_of_row(d, cfg)])
+    return csv_response(head, rows, f"ensaio-{tid}-amostras.csv")
+
+
+@app.get("/api/trials/<tid>/tips.csv")
+def trial_tips(tid):
+    if not trials.get(tid):
+        return jsonify(error="Ensaio não encontrado."), 404
+    _, tp = trials.raw(tid)
+    return csv_response(["Data e hora (datalogger)", "Chave do evento"],
+                        [[datetime.fromtimestamp(a / 1000), b] for a, b in tp], f"ensaio-{tid}-basculadas.csv")
+
+
+# ---------- diagnóstico ----------
+@app.get("/api/diag")
+def diag_api():
+    lat, pm = list(diag["lat_ms"]), list(diag["poll_ms"])
+    return jsonify(link=link_view(), polls=diag["polls"], errors=diag["errors"], rows=diag["rows"], out_of_order=diag["out_of_order"],
+                   gaps=dl.gaps, restarts=dl.restarts, stalls=diag["stalls"], retries=diag["retries"], join_miss=dl.join_miss, health=diag["health"],
+                   sample_period_s=SAMPLE_PERIOD, sample_phase_s=SAMPLE_PHASE, started=diag["started"],
+                   lat_ms={"p50": pct(lat, .5), "p95": pct(lat, .95), "max": max(lat) if lat else None},
+                   poll_ms={"p50": pct(pm, .5), "p95": pct(pm, .95), "max": max(pm) if pm else None},
+                   write_protected=bool(DASHBOARD_TOKEN), fields=dl.fields)
+
+
+# ---------- configuração ----------
+def public_cfg(cfg):
+    c = copy.deepcopy(cfg)
+    c["comm"].pop("address", None)   # o endereço do datalogger não é exibido nem editável pela interface
+    return c | {"active_mode": MODE, "write_protected": bool(DASHBOARD_TOKEN), "scan_ms": dl.scan_ms, "k_units": list(K_UNITS),
+                "flow_channels": dl.channels(), "duration_min_ms": dl.scan_ms}
+
+
+@app.get("/api/config")
+def get_config():
+    return jsonify(public_cfg(load_cfg()))
+
+
+def num(x, label):
+    try:
+        v = float(str(x).replace(",", "."))
+    except ValueError:
+        raise ValueError(f"{label}: informe um número.")
+    if not math.isfinite(v):
+        raise ValueError(f"{label}: informe um número válido.")
+    return v
+
+
+def opt_num(x, label):
+    return None if x in (None, "") or str(x).strip() == "" else num(x, label)
+
+
+def whole(x, label, lo, hi):
+    v = num(x, label)
+    if v != int(v) or not lo <= v <= hi:
+        raise ValueError(f"{label}: use um inteiro entre {lo} e {hi}.")
+    return int(v)
+
+
+def positive(x, label):
+    v = opt_num(x, label)
+    if v is not None and v <= 0:
+        raise ValueError(f"{label}: informe um valor maior que zero.")
+    return v
+
+
+def _save_cfg(cfg):
+    global _cfg
+    tmp = CFG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:   # gravação atômica: queda de energia não deixa config.json pela metade
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CFG_PATH)
+    _cfg = cfg
+
+
+@app.post("/api/config")
+@guarded
+def set_config():
+    """Configuração PARCIAL: só o que veio no corpo muda; campo ausente preserva o valor salvo; campo numérico "" apaga."""
+    d, cfg = request.get_json(silent=True) or {}, copy.deepcopy(load_cfg())
+    try:
+        for key, units in (("mass_unit", MASS_UNITS), ("temp_unit", TEMP_UNITS), ("flow_unit", FLOW_UNITS)):
+            if key in d:
+                if d[key] not in units:
+                    raise ValueError("Unidade inválida.")
+                cfg[key] = d[key]
+        for k, label in (("mass_decimals", "Casas decimais da massa"), ("temp_decimals", "Casas decimais da temperatura"),
+                         ("flow_decimals", "Casas decimais da vazão")):
+            if k in d:
+                cfg[k] = whole(d[k], label, 0, 6)
+        for k, label in (("tip_resolution_mm", "Resolução"), ("density_g_cm3", "Densidade"), ("catch_area_cm2", "Área de captação")):
+            if k in d:
+                cfg[k] = positive(d[k], label)
+        if "default_range_s" in d:
+            cfg["default_range_s"] = whole(d["default_range_s"], "Período inicial", 1, 31 * 86400)
+        # ---- medidor de vazão: método, fator K (com unidade), tolerância do 4–20 mA
+        if "flow_method" in d:
+            if d["flow_method"] not in FLOW_METHODS:
+                raise ValueError("Método do medidor inválido (analog | pulse).")
+            cfg["flow_method"] = d["flow_method"]
+        if "flow_k_unit" in d:
+            if d["flow_k_unit"] not in K_UNITS:
+                raise ValueError("Unidade do fator K inválida: use " + ", ".join(K_UNITS) + ".")
+            cfg["flow_k_unit"] = d["flow_k_unit"]
+        if "flow_k_value" in d:
+            cfg["flow_k_value"] = positive(d["flow_k_value"], "Fator K")
+        elif "flow_k_pulses_per_l" in d:   # corpo antigo: só o valor normalizado
+            cfg["flow_k_value"], cfg["flow_k_unit"] = positive(d["flow_k_pulses_per_l"], "Fator K"), "pulsos/L"
+        cfg["flow_k_pulses_per_l"] = calc.k_to_pulses_per_l(cfg["flow_k_value"], cfg["flow_k_unit"])
+        if cfg["flow_k_value"] is not None and cfg["flow_k_pulses_per_l"] is None:
+            raise ValueError("Fator K inválido para a unidade escolhida.")
+        if "flow_ma_tol" in d:
+            v = num(d["flow_ma_tol"], "Tolerância do 4–20 mA")
+            if not 0 <= v <= 1:
+                raise ValueError("Tolerância do 4–20 mA: use um valor entre 0 e 1 mA.")
+            cfg["flow_ma_tol"] = v
+        # ---- duração do ensaio: internamente em ms; mínimo = resolução efetiva do datalogger (Scan)
+        if "trial_duration_ms" in d:
+            ms = whole(d["trial_duration_ms"], "Duração do ensaio", 1, TRIAL_MAX_MS)
+            if ms < dl.scan_ms:
+                raise ValueError(f"Duração do ensaio: mínimo {dl.scan_ms} ms, que é a resolução efetiva do datalogger (Scan de {dl.scan_ms} ms). "
+                                 "Valores menores não podem ser medidos com o programa atual.")
+            cfg["trial_duration_ms"] = ms
+        elif "trial_duration_s" in d:
+            cfg["trial_duration_ms"] = whole(d["trial_duration_s"], "Duração do ensaio", 1, TRIAL_MAX_MS // 1000) * 1000
+            if cfg["trial_duration_ms"] < dl.scan_ms:
+                raise ValueError(f"Duração do ensaio: mínimo {dl.scan_ms} ms (resolução efetiva do datalogger).")
+        if "trial_duration_unit" in d:
+            if d["trial_duration_unit"] not in DUR_UNITS:
+                raise ValueError("Unidade da duração inválida (ms | s | min).")
+            cfg["trial_duration_unit"] = d["trial_duration_unit"]
+        c = d.get("cor")
+        if c is not None:
+            unit = c.get("unit", cfg["cor"]["unit"])
+            if unit not in FLOW_UNITS:
+                raise ValueError("Unidade de vazão da faixa inválida.")
+            q4 = opt_num(c["q4"], "Vazão em 4 mA") if "q4" in c else cfg["cor"]["q4"]
+            q20 = opt_num(c["q20"], "Vazão em 20 mA") if "q20" in c else cfg["cor"]["q20"]
+            if (q4 is None) != (q20 is None):
+                raise ValueError("Informe a vazão em 4 mA e em 20 mA, ou deixe as duas vazias.")
+            if q4 is not None and q4 == q20:
+                raise ValueError("A vazão em 20 mA não pode ser igual à vazão em 4 mA.")
+            cfg["cor"] = {"q4": q4, "q20": q20, "unit": unit}
+        # Comunicação: só atualiza o que veio preenchido e é válido. O ENDEREÇO nunca vem da interface; campos ausentes
+        # ou vazios preservam o valor atual (nada é gravado como "" por acidente).
+        cm, cur = d.get("comm") or {}, cfg["comm"]
+        profiles = sorted(f[:-5] for f in os.listdir(os.path.join(BASE, "profiles")) if f.endswith(".json"))
+        if cm.get("profile"):
+            if cm["profile"] not in profiles:
+                raise ValueError("Perfil do datalogger desconhecido.")
+            cur["profile"] = cm["profile"]
+        if cm.get("protocol") in ("http", "https"):
+            cur["protocol"] = cm["protocol"]
+        if str(cm.get("user") or "").strip():
+            cur["user"] = str(cm["user"]).strip()
+    except (KeyError, TypeError):
+        return jsonify(error="Valores inválidos."), 400
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    _normalize_cfg(cfg)
+    _save_cfg(cfg)
+    log.info("configuração salva (resolução=%s, área=%s, método=%s, K=%s %s, duração do ensaio=%s ms)", cfg["tip_resolution_mm"], cfg["catch_area_cm2"],
+             cfg["flow_method"], cfg["flow_k_value"], cfg["flow_k_unit"], cfg["trial_duration_ms"])
+    return jsonify(public_cfg(cfg))
+
+
+@app.post("/api/reset-count")
+@guarded
+def reset_count():
+    w("INSERT OR REPLACE INTO meta VALUES('count_since',?)", (str(int(time.time() * 1000)),))
+    return jsonify(ok=True)
+
+
+if __name__ == "__main__":
+    _lock = single_instance(os.path.join(DATA, "servidor.lock"))
+    if _lock is None:
+        log.error("Já existe uma cópia do servidor em execução nesta pasta de dados (%s). Esta cópia vai encerrar.", DATA)
+        sys.exit(1)
+    host = os.environ.get("HOST", "127.0.0.1")
+    if host not in ("127.0.0.1", "localhost") and not DASHBOARD_TOKEN:
+        log.warning("Servidor exposto em %s SEM DASHBOARD_TOKEN: qualquer máquina da rede pode alterar configurações e iniciar ensaios.", host)
+    log.info("iniciando: datalogger=%s perfil=%s protocolo=%s proteção de escrita=%s método do medidor=%s", "configurado" if _comm.get("address") else "NÃO configurado",
+             _comm.get("profile"), _comm.get("protocol"), "ligada" if DASHBOARD_TOKEN else "desligada", load_cfg()["flow_method"])
+    for _k, _env in (("address", "DATALOGGER_HOST"), ("user", "DATALOGGER_USER"), ("protocol", "DATALOGGER_PROTOCOL"), ("profile", "CR1000X_PROFILE")):
+        log.info("parâmetro de conexão %s: origem %s", _k, "variável de ambiente " + _env if os.environ.get(_env) else "config.json")
+    sio.start_background_task(acquire)
+    sio.run(app, host=host, port=int(os.environ.get("PORT", 5000)), allow_unsafe_werkzeug=True)

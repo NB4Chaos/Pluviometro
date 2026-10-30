@@ -1,0 +1,11 @@
+{
+  "comm": {
+    "protocol": "http",
+    "address": "169.254.244.82",
+    "user": "admin",
+    "profile": "programa_atual"
+  },
+  "mass_unit": "g",
+  "temp_unit": "C",
+  "tip_resolution_mm": 0.2
+}
