@@ -174,7 +174,7 @@ do ensaio. Na diferença, o recipiente e a água anterior aparecem nas duas leit
 tarada ou não.
 
 **Proteção:** se Δm < 0 (alguém esvaziou ou tarou a balança durante o ensaio), a referência fica indisponível com a mensagem
-"a massa diminuiu durante o ensaio" (`calc.py:159-161`). Uma massa que diminui não pode ser água coletada.
+"a massa diminuiu no intervalo" (`calc.py:159-161`). Uma massa que diminui não pode ser água coletada.
 
 ### 3.3 Passo 3: volume (V)
 

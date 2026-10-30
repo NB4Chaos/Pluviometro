@@ -161,7 +161,7 @@ def gravimetric(m0_g, m1_g, t0_ms, t1_ms, density_g_cm3, area_cm2, pulses=None, 
     dm = m1_g - m0_g
     r["delta_mass_g"] = dm
     if dm < 0:
-        r["issues"].append("a massa diminuiu durante o ensaio (balança esvaziada ou tarada?): referência indisponível")
+        r["issues"].append("a massa diminuiu no intervalo (balança esvaziada ou tarada?): referência indisponível")
         return r
     if not density_g_cm3 or density_g_cm3 <= 0:
         r["issues"].append("densidade da água não configurada: volume indisponível")

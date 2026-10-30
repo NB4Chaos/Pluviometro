@@ -91,3 +91,10 @@ em.t-p{background:#FFF0C2;color:#7A5200}em.t-f{background:#DDE6FA;color:#0B1F4B}
 .btn.stop{background:#B3261E;border-color:#B3261E;color:#fff}.btn:disabled{opacity:.45;cursor:not-allowed}
 .detail{border:1px solid #E3E7F0;border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:10px;margin-top:8px}
 hr{border:0;border-top:1px solid #E3E7F0;width:100%}
+/* ---- 30/10/2026: card principal dinâmico (mesmos tokens, fontes e raios) ---- */
+.hero .seg{background:rgba(255,255,255,.12)}.hero .seg button{color:#fff}.hero .seg button.on{background:var(--yellow);color:var(--navy)}
+.seg button:disabled{opacity:.5;cursor:not-allowed}
+.inl select{min-height:40px;padding:0 10px;border-radius:12px}.hero .inl select{background:rgba(255,255,255,.12);color:#fff;border-color:rgba(255,255,255,.3)}.hero .inl select option{color:var(--navy)}
+.hero .note{color:#B8C4E0}.hero .note.warn{color:#FFD76A}.hero .note.ok{color:#6EE7A0}
+.row>.card:not(.hero) .bar i{background:var(--navy)}
+#trial-ctl .note{flex-basis:100%}
