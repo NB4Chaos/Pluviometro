@@ -63,7 +63,7 @@ function setPills() {
   pill('#p-cor', comm);
   const c = $('#conn'), err = l.error;
   c.className = 'pill ' + (!S.sock ? 'err' : stale ? (err ? 'err' : 'warn') : 'ok');
-  c.lastElementChild.textContent = !S.sock ? 'Servidor desconectado' : stale ? (err ? 'Datalogger sem resposta' : 'Aguardando dados novos') : 'Recebendo dados do CR1000Xe';
+  c.lastElementChild.textContent = !S.sock ? 'Servidor desconectado' : stale ? (err ? 'Datalogger sem resposta' : 'Aguardando dados novos') : 'Recebendo dados do datalogger';
   c.title = err || (stale ? '' : 'Dados reais do datalogger');
   document.body.classList.toggle('stale-data', stale);
   const sk = $('#skew'), k = l.clock_skew_s;
@@ -172,7 +172,7 @@ function renderPluv() {
 function corMethodNote(s, fe, ch) {
   const m = S.cfg.flow_method || 'analog', lab = Trials.METHOD[m];
   if (S.link && S.link.flow_integrated === false) return ['O programa do datalogger não fornece o medidor de vazão.', 'warn'];
-  if (!ch[m]) return [m === 'pulse' ? 'Pulsos solicitado · o programa em execução no CR1000Xe não fornece o canal de pulsos (P2): carregue o Pluviometria_v4_vazao_pulsos.CR1X.'
+  if (!ch[m]) return [m === 'pulse' ? 'Pulsos solicitado · o programa em execução no datalogger não fornece o canal de pulsos (P2): carregue o Pluviometria_v4_vazao_pulsos.CR1X.'
     : 'Analógico solicitado · o programa em execução não fornece o canal analógico (RG1).', 'warn'];
   if (isStale()) return [`${lab} solicitado · aguardando dado do datalogger`, 'warn'];
   if (fe.active === m && fe.state === 'ok') return [`${lab} ativo · confirmado por dado do datalogger às ${Fmt.time(s.ts)}`, 'ok'];
@@ -403,7 +403,7 @@ function corError(q4, q20) {
 }
 function kNote() {
   const v = num($('#cf-k').value), u = $('#cf-ku').value;
-  if (v === null) return 'Sem fator K a vazão por pulsos fica indisponível (a contagem bruta continua sendo registrada). O K do MAG 5000 está no menu de saídas do medidor: não há valor padrão.';
+  if (v === null) return 'Sem fator K a vazão por pulsos fica indisponível (a contagem bruta continua sendo registrada). O fator K está no menu de saídas do medidor: não há valor padrão.';
   if (!isFinite(v) || v <= 0) return 'Fator K: informe um número maior que zero.';
   const ppl = u === 'pulsos/L' ? v : u === 'pulsos/m³' ? v / 1000 : u === 'L/pulso' ? 1 / v : 1000 / v;
   return `= ${Fmt.any(ppl)} pulsos/L · 1 pulso = ${Fmt.any(1000 / ppl)} mL · em ${scanMs()} ms, 1 pulso = ${fnum(flowL(60 / ppl / (scanMs() / 1000)))} ${S.cfg.flow_unit}`;

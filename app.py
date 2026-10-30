@@ -15,7 +15,7 @@ if not os.environ.get("DATALOGGER_PASSWORD"):
     _stored_password = keyring.get_password(_KEYRING_SERVICE, "DATALOGGER_PASSWORD")
     if not _stored_user or not _stored_password:
         raise RuntimeError(
-            "Credenciais do CR1000Xe não encontradas no armazenamento do Windows. "
+            "Credenciais do datalogger não encontradas no armazenamento do Windows. "
             "Cadastre DATALOGGER_USER e DATALOGGER_PASSWORD no serviço Elus-CR1000Xe."
         )
     os.environ["DATALOGGER_USER"] = _stored_user
@@ -793,7 +793,7 @@ def flow_method():
         return jsonify(error="Há um ensaio em andamento: o método não pode ser trocado até ele terminar."), 409
     ch = dl.channels()
     if dl.has_flow and dl.fields.get((dl.profile.get("flow") or {}).get("table")) and not ch.get(m):
-        return jsonify(error=("O programa em execução no CR1000Xe não fornece o canal de pulsos (P2): carregue o Pluviometria_v4_vazao_pulsos.CR1X."
+        return jsonify(error=("O programa em execução no datalogger não fornece o canal de pulsos (P2): carregue o Pluviometria_v4_vazao_pulsos.CR1X."
                               if m == "pulse" else "O programa em execução não fornece o canal analógico (RG1).")), 400
     cfg = copy.deepcopy(load_cfg())
     cfg["flow_method"] = m

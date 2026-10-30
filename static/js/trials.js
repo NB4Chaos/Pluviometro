@@ -62,7 +62,7 @@ const Trials = {
     return `<p class="lbl sec">Temporização (carimbos do datalogger)</p><div class="rg">${K('Início (1ª amostra)', Fmt.dtms(t.first_sample_ts))}${K('Fim (última amostra)', Fmt.dtms(t.last_sample_ts))}
       ${K('Duração configurada', t.cfg_ms == null ? '—' : `${Fmt.num(t.cfg_ms, 0)} ms`)}${K('Tempo efetivamente medido', s(t.eff_ms))}${K('Diferença (medido − configurado)', diff)}
       ${K('Resolução efetiva', `${r} ms (Scan)`)}${K('Amostras', t.samples)}${K('Relógio do PC (informativo)', t.wall_ms == null ? '—' : `${Fmt.num(t.wall_ms / 1000, 1)} s`)}</div>
-      <p class="note">A resolução efetiva é o intervalo do Scan do CR1000Xe: início e fim ficam quantizados em ±1 Scan. Comparar com uma referência externa de tempo é o que permite avaliar o temporizador; este bloco só registra os valores necessários.</p>`;
+      <p class="note">A resolução efetiva é o intervalo do Scan do datalogger: início e fim ficam quantizados em ±1 Scan. Comparar com uma referência externa de tempo é o que permite avaliar o temporizador; este bloco só registra os valores necessários.</p>`;
   },
 
   // Blocos separados por instrumento. `which`: 'bal' (balança + comparação), 'pluv' (pluviômetro) ou 'all' (histórico/relatório).
