@@ -1,12 +1,12 @@
 {
   "nome": "programa_vazao",
-  "descricao": "Pluviometria_v3_com_vazao_4-20mA.CR1X (em uso) e Pluviometria_v4_vazao_pulsos.CR1X: Balanca1s, Termopar1s, Pluviometro1s + Vazao1s (4-20 mA em RG1; pulsos em P2 so na v4). Campos de pulso sao opcionais: ausentes na tabela = canal indisponivel.",
-  "scan_ms": 1000,
+  "descricao": "Pluviometria v3/v4 com medidor de vazao: Balanca1s, Termopar1s, Pluviometro1s + Vazao1s (4-20 mA em RG1; pulsos em P2 so na v4). Os campos de pulso sao opcionais: o servidor detecta pelo cabecalho da tabela se o programa carregado os tem.",
   "mass": {"table": "Balanca1s", "value": "Peso_g", "factor": 1.0,
            "status": "StatusBal", "status_map": {"0": "ok", "1": "no_comm", "2": "invalid", "3": "invalid", "4": "invalid"}},
   "temp": {"table": "Termopar1s", "value": "TempAgua_C"},
   "tips": {"table": "Pluviometro1s", "count": "Pluvio_Basculadas_1s"},
   "cor": null,
   "flow": {"table": "Vazao1s", "mode": "Flow_mode", "ma": "Flow_mA", "status": "Flow_Status",
-           "pulses": "Flow_Pulsos", "pulses_total": "Flow_PulsosTot", "pstatus": "Flow_PStatus"}
+           "pulses": "Flow_Pulsos", "pulses_total": "Flow_PulsosTot", "pulse_status": "Flow_PStatus",
+           "optional": ["mode", "pulses", "pulses_total", "pulse_status"]}
 }

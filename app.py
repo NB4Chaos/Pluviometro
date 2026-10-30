@@ -1,81 +1,47 @@
 import copy, csv, hmac, io, json, logging, math, os, sqlite3, sys, threading, time
+from bisect import bisect_right
 from collections import deque
 from datetime import datetime
 from functools import wraps
 from logging.handlers import RotatingFileHandler
-
-# ---------- credenciais e conexão automática com o CR1000Xe ----------
-# A senha não fica gravada neste arquivo: é recuperada do Gerenciador de
-# Credenciais do Windows pelo pacote keyring, usando a conta do Windows atual.
-# Se DATALOGGER_PASSWORD já vier do ambiente (testes automáticos), o keyring não é consultado.
-if not os.environ.get("DATALOGGER_PASSWORD"):
-    import keyring
-    _KEYRING_SERVICE = "Elus-CR1000Xe"
-    _stored_user = keyring.get_password(_KEYRING_SERVICE, "DATALOGGER_USER")
-    _stored_password = keyring.get_password(_KEYRING_SERVICE, "DATALOGGER_PASSWORD")
-    if not _stored_user or not _stored_password:
-        raise RuntimeError(
-            "Credenciais do datalogger não encontradas no armazenamento do Windows. "
-            "Cadastre DATALOGGER_USER e DATALOGGER_PASSWORD no serviço Elus-CR1000Xe."
-        )
-    os.environ["DATALOGGER_USER"] = _stored_user
-    os.environ["DATALOGGER_PASSWORD"] = _stored_password
-    os.environ.setdefault("DATALOGGER_HOST", "169.254.244.82")
-    os.environ.setdefault("DATALOGGER_PROTOCOL", "http")
-    os.environ.setdefault("CR1000X_PROFILE", "programa_vazao")
 
 from flask import Flask, Response, jsonify, render_template, request
 from flask_socketio import SocketIO
 
 import calc
 from datalogger import Reading, make_datalogger
-from trials import SCOLS_LIST as TRIAL_COLS, Trials, TrialError, flow_of_row as trial_flow_of_row
+from trials import Trials, TrialError
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("ELUS_DATA_DIR") or BASE   # banco, cursor, config.json e logs (os testes usam uma pasta temporária)
 os.makedirs(DATA, exist_ok=True)
 CFG_PATH = os.path.join(DATA, "config.json")
 SAMPLE_PERIOD = float(os.environ.get("SAMPLE_PERIOD", "1.0"))  # s entre consultas ao datalogger (o Scan do CRBasic é de 1 s)
-SAMPLE_PHASE = float(os.environ.get("SAMPLE_PHASE", "0.25"))   # s depois do segundo cheio: o Scan já gravou as tabelas quando a consulta sai
-RETRY_S = 0.12                                                 # se a gravação do Scan ainda não chegou, nova tentativa curta (até 3)
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN") or None   # se definido, protege TODA operação de escrita
+KEYRING_SERVICE = "Elus-CR1000Xe"
+# Padrões DESTA instalação: valem só quando a senha vem do keyring (uso normal) e nem o ambiente nem o config.json definem o valor
+INSTALL_DEFAULTS = {"address": "169.254.244.82", "protocol": "http", "profile": "programa_vazao"}
 MASS_UNITS, TEMP_UNITS = ("mg", "g", "kg", "lb", "oz"), ("C", "F", "K")
 FLOW_UNITS = ("L/min", "L/h", "mL/min", "mL/s", "m³/h", "m³/s", "m³/min", "kg/h", "kg/s")
-FLOW_METHODS, DUR_UNITS, K_UNITS = ("analog", "pulse"), ("ms", "s", "min"), calc.K_UNITS
-TRIAL_MAX_MS = 6 * 3600 * 1000
+FLOW_METHODS = ("analog", "pulse")
+METHOD_LABEL = {"analog": "analógico (4–20 mA)", "pulse": "pulsos"}
 DEFAULTS = {"mass_unit": "g", "temp_unit": "C", "flow_unit": "L/min", "mass_decimals": 1, "temp_decimals": 2,
             "flow_decimals": 3, "density_g_cm3": None, "tip_resolution_mm": None,
             "default_range_s": 900,
             "catch_area_cm2": None,        # área da ABERTURA do coletor (cm²). Não é a da báscula.
-            # Medidor de Vazão: o CR1000Xe mede os dois canais (RG1 em mA; P2 em pulsos, no programa v4) em todo Scan.
-            # O MÉTODO é escolhido aqui, no servidor, e congelado no início de cada ensaio. Nada é escrito no datalogger.
-            "flow_method": "analog",       # analog | pulse
-            "flow_k_value": None, "flow_k_unit": "pulsos/L",   # fator K como o operador informou (nunca presumido)
-            "flow_k_pulses_per_l": None,   # fator K normalizado (pulsos/L): derivado dos dois acima; mantido por compatibilidade
-            "flow_ma_tol": calc.MA_TOL,    # tolerância (mA) nos limites de 4 e 20 mA (preso ao limite, sem extrapolar)
-            "trial_duration_ms": 60000,    # duração dos ensaios; fixada no início de cada ensaio; mínimo = Scan do datalogger
-            "trial_duration_unit": "s",    # unidade em que o operador digita (ms | s | min); internamente tudo é ms
-            "trial_duration_s": 60,        # derivado de trial_duration_ms (compatibilidade)
+            "flow_k_pulses_per_l": None,   # fator K do medidor por pulsos, sempre em pulsos/L (fonte única). Nunca presumido.
+            "flow_k_unit": "pulsos/L",     # só a unidade em que o operador digita e vê o K (calc.K_UNITS)
+            "flow_method": "analog",       # método do cálculo da vazão: analog | pulse (o datalogger mede os dois canais)
+            "flow_ma_tol": calc.MA_TOL,    # mA: tolerância nos limites 4 e 20 mA (dentro dela a escala fica presa no limite)
+            "trial_duration_s": 60,        # duração dos ensaios (card da balança); fixada no início de cada ensaio
             "cor": {"q4": None, "q20": None, "unit": "L/min"},  # faixa 4–20 mA: definida pelo operador, nunca fixa no código
             "comm": {"protocol": "http", "address": "", "user": "", "profile": "programa_atual"}}
 COLS = ["ts", "mass_g", "temp_c", "mass_status", "temp_status", "tips_total", "cor_ma", "cor_status",
-        "flow_mode", "flow_pulses", "flow_hz", "flow_pulses_total", "pulse_status"]
-# Regravar um horário que já existe (releitura do datalogger) só COMPLETA campos vazios; nunca substitui uma leitura válida.
-UPSERT_SQL = f"""INSERT INTO samples({','.join(COLS)}) VALUES({','.join('?' * len(COLS))}) ON CONFLICT(ts) DO UPDATE SET
-  mass_g=COALESCE(samples.mass_g, excluded.mass_g),
-  mass_status=CASE WHEN samples.mass_g IS NULL THEN excluded.mass_status ELSE samples.mass_status END,
-  temp_c=COALESCE(samples.temp_c, excluded.temp_c),
-  temp_status=CASE WHEN samples.temp_c IS NULL THEN excluded.temp_status ELSE samples.temp_status END,
-  tips_total=COALESCE(samples.tips_total, excluded.tips_total),
-  cor_ma=COALESCE(samples.cor_ma, excluded.cor_ma),
-  cor_status=CASE WHEN samples.cor_ma IS NULL THEN COALESCE(excluded.cor_status, samples.cor_status) ELSE samples.cor_status END,
-  flow_mode=COALESCE(samples.flow_mode, excluded.flow_mode),
-  flow_pulses=COALESCE(samples.flow_pulses, excluded.flow_pulses),
-  flow_hz=COALESCE(samples.flow_hz, excluded.flow_hz),
-  flow_pulses_total=COALESCE(samples.flow_pulses_total, excluded.flow_pulses_total),
-  pulse_status=CASE WHEN samples.flow_pulses IS NULL THEN COALESCE(excluded.pulse_status, samples.pulse_status) ELSE samples.pulse_status END"""
-LAB = {"no_comm": "Sem comunicação", "invalid": "Leitura inválida", "out_of_range": "Fora da faixa", "fail": "Falha do sinal (< 3,6 mA)",
-       "unavailable": "Canal indisponível no programa", "unconfigured": "Não configurado", "na": "Aguardando integração"}
+        "flow_mode", "flow_pulses", "flow_hz", "pulses_total", "ma_code", "pulse_code", "flow_dt_ms"]
+INSERT_SQL = f"INSERT OR IGNORE INTO samples({','.join(COLS)}) VALUES({','.join('?' * len(COLS))})"
+UPDATE_SQL = f"UPDATE samples SET {','.join(c + '=?' for c in COLS[1:])} WHERE ts=?"
+LAB = {"no_comm": "Sem comunicação", "invalid": "Leitura inválida", "out_of_range": "Fora da faixa",
+       "fault": "Falha do sinal (< 3,6 mA)", "unavailable": "Canal indisponível no programa", "unconfigured": "Não configurado"}
 
 
 # ---------- logs (arquivo com rotação + terminal; nunca registra senha nem token) ----------
@@ -101,78 +67,81 @@ sio = SocketIO(app, async_mode="threading")
 lock = threading.Lock()
 
 
-# ---------- instância única (no Windows uma 2ª cópia subiria na mesma porta e gravaria o mesmo banco) ----------
-def single_instance(path):
-    """Tranca `path`; devolve o arquivo trancado, ou None se outra cópia do servidor já o tem."""
-    f = open(path, "a+")
-    try:
-        f.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        f.close()
-        return None
-    return f
-
-
-def release_instance(f):
-    try:
-        f.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(f, fcntl.LOCK_UN)
-    finally:
-        f.close()
-
-
-# ---------- configuração (lida do disco uma vez; só set_config a atualiza) ----------
-def _normalize_cfg(cfg):
-    """Campos derivados: duração em ms ↔ s e fator K normalizado. Nunca inventa valor: só converte o que foi informado."""
-    ms = cfg.get("trial_duration_ms")
-    if not ms:
-        ms = int(round(float(cfg.get("trial_duration_s") or DEFAULTS["trial_duration_s"]) * 1000))
-    cfg["trial_duration_ms"] = int(ms)
-    cfg["trial_duration_s"] = ms // 1000 if ms % 1000 == 0 else ms / 1000
-    if cfg.get("flow_k_value") is None and cfg.get("flow_k_pulses_per_l"):   # configuração antiga: só o valor em pulsos/L
-        cfg["flow_k_value"], cfg["flow_k_unit"] = cfg["flow_k_pulses_per_l"], "pulsos/L"
-    cfg["flow_k_pulses_per_l"] = calc.k_to_pulses_per_l(cfg.get("flow_k_value"), cfg.get("flow_k_unit"))
-    if cfg.get("flow_method") not in FLOW_METHODS:
-        cfg["flow_method"] = "analog"
-    return cfg
-
-
+# ---------- configuração (lida do disco uma vez; só save_cfg a atualiza) ----------
 def _read_cfg():
-    cfg = copy.deepcopy(DEFAULTS)
+    """Configuração = padrões + config.json. Chave nova ausente ou inválida volta ao padrão seguro (arquivos antigos continuam valendo)."""
+    cfg, user = copy.deepcopy(DEFAULTS), {}
     if os.path.exists(CFG_PATH):
         with open(CFG_PATH, encoding="utf-8") as f:
             user = json.load(f)
         cfg.update({k: v for k, v in user.items() if k not in ("comm", "cor")})
-        if "trial_duration_ms" not in user:        # configuração anterior só tinha segundos
-            cfg["trial_duration_ms"] = None
         cfg["comm"].update({k: v for k, v in user.get("comm", {}).items() if k != "mode"})
         cfg["cor"].update(user.get("cor", {}))
-    return _normalize_cfg(cfg)
+    if cfg.get("flow_method") not in FLOW_METHODS:
+        cfg["flow_method"] = "analog"
+    if cfg.get("flow_k_unit") not in calc.K_UNITS:
+        cfg["flow_k_unit"] = "pulsos/L"
+    tol = cfg.get("flow_ma_tol")
+    if isinstance(tol, bool) or not isinstance(tol, (int, float)) or not 0 <= tol <= 0.2:
+        cfg["flow_ma_tol"] = calc.MA_TOL
+    k = cfg.get("flow_k_pulses_per_l")
+    if k is not None and (isinstance(k, bool) or not isinstance(k, (int, float)) or not math.isfinite(k) or k <= 0):
+        log.warning("Fator K inválido no config.json (%r): ignorado; a vazão por pulsos fica 'não configurada'", k)
+        cfg["flow_k_pulses_per_l"] = None
+    return cfg, user.get("comm", {})
 
 
-_cfg = _read_cfg()
+_cfg, _user_comm = _read_cfg()
 
 
 def load_cfg():
     return _cfg
 
 
+def save_cfg(cfg):
+    """Grava o config.json de forma atômica (queda de energia não deixa o arquivo pela metade) e passa a usá-lo."""
+    global _cfg
+    tmp = CFG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CFG_PATH)
+    _cfg = cfg
+
+
+def load_credentials():
+    """Usuário e senha do CR1000Xe. Uso normal: Gerenciador de Credenciais do Windows (keyring, serviço Elus-CR1000Xe).
+    A senha nunca fica em arquivo. DATALOGGER_PASSWORD já no ambiente (testes automáticos) dispensa o keyring.
+    Devolve a origem ('keyring' | 'ambiente'); sem credencial, registra o motivo no log e encerra."""
+    if os.environ.get("DATALOGGER_PASSWORD"):
+        return "ambiente"
+    try:
+        import keyring
+        user = keyring.get_password(KEYRING_SERVICE, "DATALOGGER_USER")
+        pw = keyring.get_password(KEYRING_SERVICE, "DATALOGGER_PASSWORD")
+    except Exception as e:   # pacote ausente ou cofre inacessível
+        log.error("Não consegui ler o Gerenciador de Credenciais do Windows: %s", e)
+        user = pw = None
+    if not user or not pw:
+        log.error("Credenciais do CR1000Xe não encontradas no Gerenciador de Credenciais do Windows (serviço %s, chaves "
+                  "DATALOGGER_USER e DATALOGGER_PASSWORD). Cadastre as duas e inicie o servidor de novo.", KEYRING_SERVICE)
+        raise SystemExit(2)
+    os.environ["DATALOGGER_USER"], os.environ["DATALOGGER_PASSWORD"] = user, pw
+    return "keyring"
+
+
 MODE = "cr1000x"  # único modo: não existe mais geração de dados fictícios
-_comm = dict(load_cfg()["comm"])
+CRED_SOURCE = load_credentials()
+# Conexão: variável de ambiente > config.json > padrão desta instalação (só no uso normal, com keyring) > padrão do código.
+_comm, _origin = dict(load_cfg()["comm"]), {}
 for _k, _env in (("address", "DATALOGGER_HOST"), ("user", "DATALOGGER_USER"), ("protocol", "DATALOGGER_PROTOCOL"), ("profile", "CR1000X_PROFILE")):
-    if os.environ.get(_env):  # variável de ambiente tem prioridade sobre o config.json
-        _comm[_k] = os.environ[_env]
+    if os.environ.get(_env):
+        _comm[_k], _origin[_k] = os.environ[_env], _env
+    elif _user_comm.get(_k):
+        _origin[_k] = "config.json"
+    elif CRED_SOURCE == "keyring" and _k in INSTALL_DEFAULTS:
+        _comm[_k], _origin[_k] = INSTALL_DEFAULTS[_k], "padrão da instalação"
+    else:
+        _origin[_k] = "padrão"
 dl = make_datalogger(_comm)
 
 # ---------- banco ----------
@@ -186,7 +155,7 @@ CREATE INDEX IF NOT EXISTS ix_tips ON tips(ts);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);""")
 _have = {r[1] for r in db.execute("PRAGMA table_info(samples)")}
 for _col, _typ in (("cor_ma", "REAL"), ("cor_status", "TEXT"), ("flow_mode", "TEXT"), ("flow_pulses", "REAL"), ("flow_hz", "REAL"),
-                   ("flow_pulses_total", "INTEGER"), ("pulse_status", "TEXT")):
+                   ("pulses_total", "INTEGER"), ("ma_code", "INTEGER"), ("pulse_code", "INTEGER"), ("flow_dt_ms", "INTEGER")):
     if _col not in _have:  # bancos antigos ganham as colunas novas sem perder dados
         db.execute(f"ALTER TABLE samples ADD COLUMN {_col} {_typ}")
 if "src" not in {r[1] for r in db.execute("PRAGMA table_info(tips)")}:  # banco antigo: ganha a chave única do evento
@@ -231,137 +200,79 @@ def latest_sample_ts():
 
 
 state = {"latest": None, "last_rx": None, "trial_id": None}
-trials = Trials(db, lock, load_cfg, latest_sample_ts, scan_ms=dl.scan_ms)
+trials = Trials(db, lock, load_cfg, latest_sample_ts)
 
 
-# ---------- Medidor de Vazão: método (analógico | pulsos) escolhido no servidor, cálculo sempre a partir do dado bruto ----------
-def lin(ma, cor):
-    """Relação linear entre 4 e 20 mA e a faixa configurada. None se a faixa não está configurada."""
-    if ma is None or cor["q4"] is None or cor["q20"] is None:
-        return None
-    return cor["q4"] + (ma - 4) / 16 * (cor["q20"] - cor["q4"])
+# ---------- Medidor de Vazão: os dois canais (4–20 mA em RG1 e pulsos em P2) -> L/min, sempre a partir do dado bruto ----------
+def flow_cfg(cfg):
+    """Parâmetros do medidor no formato de calc.flow_reading (fonte única: config.json)."""
+    return {"q4": cfg["cor"]["q4"], "q20": cfg["cor"]["q20"], "range_unit": cfg["cor"]["unit"], "density": cfg["density_g_cm3"],
+            "k_pulses_per_l": cfg["flow_k_pulses_per_l"], "ma_tol": cfg["flow_ma_tol"]}
 
 
-_MA_STATE = {"ok": "ok", "under": "out_of_range", "over": "out_of_range", "fail": "fail", "none": "invalid"}
-
-
-def cor_class(r, tol=None):
-    """Estado GRAVADO do canal analógico: o mA original é sempre preservado; fora de 4–20 mA fica marcado, não descartado."""
-    if r.cor_status in (None, "no_comm", "invalid"):
-        return r.cor_status
-    return _MA_STATE[calc.classify_ma(r.cor_ma, tol if tol is not None else load_cfg()["flow_ma_tol"])[0]]
-
-
-def flow_eval(cfg, channels, ma, cor_status, pulses, pulse_status, dt_s=None, has_flow=True):
-    """Vazão instantânea pelo MÉTODO configurado, a partir do dado bruto de UMA amostra.
-
-    Devolve {method (solicitado), active (método realmente usado, só quando houve cálculo), channels, state, reason, value_l_min}.
-    Estados: ok | na (programa sem medidor) | unavailable (programa sem o canal do método) | no_comm | invalid | fail (< 3,6 mA)
-             | out_of_range | unconfigured (K, faixa ou densidade ausentes). Erro nunca vira zero.
-    """
-    method = cfg.get("flow_method") if cfg.get("flow_method") in FLOW_METHODS else "analog"
-    channels = channels or {"analog": False, "pulse": False}
-    out = {"method": method, "active": None, "channels": channels, "state": "na", "reason": None, "value_l_min": None}
-    if not has_flow:
-        out["reason"] = "o programa do datalogger não fornece o medidor de vazão"
-        return out
-    if not channels.get(method):
-        out["state"] = "unavailable"
-        out["reason"] = ("o programa em execução não fornece o canal de pulsos (P2): carregue o Pluviometria_v4_vazao_pulsos.CR1X"
-                         if method == "pulse" else "o programa em execução não fornece o canal analógico (RG1)")
-        return out
-    if method == "pulse":
-        if pulse_status in (None, "no_comm"):
-            out["state"] = "no_comm"
-            return out
-        if pulse_status != "ok":
-            out["state"] = "invalid"
-            return out
-        k = cfg.get("flow_k_pulses_per_l")
-        if not k:
-            out["state"], out["reason"] = "unconfigured", "informe o fator K (pulsos por volume) do medidor"
-            return out
-        v = calc.pulse_flow_l_min(pulses, dt_s if dt_s else dl.scan_ms / 1000.0, k)
-    else:
-        if cor_status in (None, "no_comm"):
-            out["state"] = "no_comm"
-            return out
-        if cor_status == "invalid":
-            out["state"] = "invalid"
-            return out
-        cls, mac = calc.classify_ma(ma, cfg.get("flow_ma_tol", calc.MA_TOL))
-        if cls == "fail":
-            out["state"], out["reason"] = "fail", "sinal abaixo de 3,6 mA: falha do transmissor ou do laço (NAMUR NE 43)"
-            return out
-        if cls in ("under", "over"):
-            out["state"], out["reason"] = "out_of_range", f"{ma:.3f} mA fora de 4–20 mA"
-            return out
-        if cls == "none":
-            out["state"] = "invalid"
-            return out
-        cor = cfg["cor"]
-        if cor["q4"] is None or cor["q20"] is None:
-            out["state"], out["reason"] = "unconfigured", "informe a vazão em 4 mA e em 20 mA"
-            return out
-        v = calc.flow_to_l_min(lin(mac, cor), cor["unit"], cfg["density_g_cm3"])
-        if v is None:
-            out["state"], out["reason"] = "unconfigured", "informe a densidade da água (faixa em unidade mássica)"
-            return out
-    if v is None:
-        out["state"], out["reason"] = "unconfigured", "não foi possível calcular a vazão"
-        return out
-    out["state"], out["active"], out["value_l_min"] = "ok", method, v
-    return out
-
-
-def flow_reading(r, cfg):
-    return flow_eval(cfg, r.flow_channels, r.cor_ma, r.cor_status, r.flow_pulses, r.pulse_status, dl.scan_ms / 1000.0, dl.has_flow)
-
-
-def flow_row(d, cfg):
-    """(vazão em L/min, estado) de uma linha gravada (dict com as colunas de COLS). Os canais são os que a linha tem."""
-    ch = {"analog": d.get("cor_status") is not None, "pulse": d.get("pulse_status") is not None}
-    cs = "ok" if d.get("cor_ma") is not None else d.get("cor_status")
-    fe = flow_eval(cfg, ch, d.get("cor_ma"), cs, d.get("flow_pulses"), d.get("pulse_status"), dl.scan_ms / 1000.0, dl.has_flow or any(ch.values()))
-    return fe["value_l_min"], fe["state"]
+def flow_value(mode, ma, hz, status, cfg=None, fc=None):
+    """(vazão em L/min, estado detalhado) de uma amostra GRAVADA, recalculada do dado bruto com a configuração atual.
+    `mode` = método usado na amostra; amostras antigas sem método contam como analógicas (único modo que existia).
+    `fc` = flow_cfg já montado: quem converte muitas linhas monta uma vez só."""
+    if status is None:
+        return None, "na"
+    fc = fc or flow_cfg(cfg or load_cfg())
+    if status != "ok":
+        if status == "out_of_range" and (mode or "analog") == "analog" and ma is not None:
+            return None, "fault" if calc.classify_ma(ma, fc["ma_tol"])[0] == "fault" else "out_of_range"
+        return None, status
+    if mode == "pulse":
+        if hz is None:
+            return None, "invalid"
+        k = fc["k_pulses_per_l"]
+        return (hz / k * 60.0, "ok") if k else (None, "unconfigured")
+    cls, eff = calc.classify_ma(ma, fc["ma_tol"])
+    if eff is None:
+        return None, {"fault": "fault", "invalid": "invalid"}.get(cls, "out_of_range")
+    v = calc.analog_flow_l_min(eff, fc["q4"], fc["q20"], fc["range_unit"], fc["density"])
+    return (v, "ok") if v is not None else (None, "unconfigured")
 
 
 def flow_stats(where, a, cfg):
-    """Média/mín/máx da vazão (L/min) no período pelo método configurado. Pulso e mA são lineares: média da vazão = vazão da média."""
-    an = q(f"SELECT AVG(cor_ma),MIN(cor_ma),MAX(cor_ma),COUNT(cor_ma) FROM samples WHERE {where} AND cor_status='ok'", a)[0]
-    n_out = q(f"SELECT COUNT(*) FROM samples WHERE {where} AND cor_status IN ('out_of_range','fail')", a)[0][0]
-    pu = q(f"SELECT AVG(flow_hz),MIN(flow_hz),MAX(flow_hz),COUNT(flow_pulses),SUM(flow_pulses) FROM samples WHERE {where} AND pulse_status='ok'", a)[0]
+    """Média/mín/máx da vazão (L/min) no período. Pulso e mA são lineares: média da vazão = vazão da média.
+    No analógico a escala usa o mA preso a 4–20 (amostras válidas dentro da tolerância); a média em mA mostrada é a bruta."""
+    base = f"FROM samples WHERE {where} AND cor_status='ok'"
+    n_out = q(f"SELECT COUNT(*) FROM samples WHERE {where} AND cor_status='out_of_range'", a)[0][0]
+    pu = q(f"SELECT AVG(flow_hz),MIN(flow_hz),MAX(flow_hz),COUNT(flow_hz) {base} AND flow_mode='pulse'", a)[0]
+    clamp = "MIN(MAX(cor_ma,4.0),20.0)"
+    an = q(f"SELECT AVG(cor_ma),MIN(cor_ma),MAX(cor_ma),COUNT(cor_ma),AVG({clamp}),MIN({clamp}),MAX({clamp}) {base} "
+           f"AND COALESCE(flow_mode,'analog')='analog'", a)[0]
     f = lambda v: None if v is None else round(v, 3)
-    method = cfg.get("flow_method") or "analog"
-    out = {"ma": {"avg": f(an[0]), "min": f(an[1]), "max": f(an[2]), "n": an[3], "n_out": n_out}, "flow": None, "pulses": None,
-           "mode": method, "mixed": False}
+    ma = {"avg": f(an[0]), "min": f(an[1]), "max": f(an[2]), "n": an[3], "n_out": n_out}
+    out = {"ma": ma, "flow": None, "pulses": None, "mode": "pulse" if pu[3] > an[3] else "analog" if an[3] else None,
+           "mixed": bool(pu[3] and an[3])}
     if pu[3]:
-        out["pulses"] = {"avg_hz": f(pu[0]), "n": pu[3], "sum": int(pu[4] or 0)}
+        out["pulses"] = {"avg_hz": f(pu[0]), "n": pu[3]}
+    use_pulse = out["mode"] == "pulse"
     k, cor = cfg["flow_k_pulses_per_l"], cfg["cor"]
-    if method == "pulse" and k and pu[3]:
+    if use_pulse and k:
         out["flow"] = {"avg": f(pu[0] / k * 60), "min": f(pu[1] / k * 60), "max": f(pu[2] / k * 60), "unit": "L/min"}
-    elif method == "analog" and an[3] and cor["q4"] is not None and cor["q20"] is not None:
-        vals = [calc.flow_to_l_min(lin(m, cor), cor["unit"], cfg["density_g_cm3"]) for m in (an[0], an[1], an[2])]
+    elif not use_pulse and an[3] and cor["q4"] is not None and cor["q20"] is not None:
+        vals = [calc.analog_flow_l_min(m, cor["q4"], cor["q20"], cor["unit"], cfg["density_g_cm3"]) for m in (an[4], an[5], an[6])]
         if None not in vals:
             lo, hi = sorted([vals[1], vals[2]])
             out["flow"] = {"avg": f(vals[0]), "min": f(lo), "max": f(hi), "unit": "L/min"}
     return out
 
 
-def stats(where, a, cfg=None):
+def stats(where, a):
     """Média, mínimo, máximo e nº de leituras válidas (valores nulos ficam de fora). Média do PERÍODO inteiro."""
-    cfg = cfg or load_cfg()
     r = q(f"SELECT AVG(mass_g),MIN(mass_g),MAX(mass_g),COUNT(mass_g),AVG(temp_c),MIN(temp_c),MAX(temp_c),COUNT(temp_c) "
           f"FROM samples WHERE {where}", a)[0]
     f = lambda v: None if v is None else round(v, 3)
     return {"mass": {"avg": f(r[0]), "min": f(r[1]), "max": f(r[2]), "n": r[3]},
             "temp": {"avg": f(r[4]), "min": f(r[5]), "max": f(r[6]), "n": r[7]},
-            "cor": flow_stats(where, a, cfg)}
+            "cor": flow_stats(where, a, load_cfg())}
 
 
-def period_grav(fr, to, cfg=None):
+def period_grav(fr, to):
     """Referência gravimétrica do período [fr, to): 1ª e última massa válida e basculadas em (t0, t1], a mesma regra dos ensaios."""
-    cfg = cfg or load_cfg()
+    cfg = load_cfg()
     sql = "SELECT ts,mass_g FROM samples WHERE ts>=? AND ts<? AND mass_g IS NOT NULL ORDER BY ts {} LIMIT 1"
     a, b = q(sql.format("ASC"), (fr, to)), q(sql.format("DESC"), (fr, to))
     if not a or a[0][0] == b[0][0]:
@@ -373,8 +284,14 @@ def period_grav(fr, to, cfg=None):
 
 # ---------- aquisição ----------
 diag = {"polls": 0, "errors": 0, "consec_errors": 0, "poll_ms": deque(maxlen=300), "lat_ms": deque(maxlen=300),
-        "rows": 0, "out_of_order": 0, "stalls": 0, "retries": 0, "last_ts": None, "live": True, "started": int(time.time() * 1000), "health": {}}
+        "rows": 0, "out_of_order": 0, "merged": 0, "stalls": 0, "empty_polls": 0, "last_ts": None, "live": True,
+        "started": int(time.time() * 1000), "health": {}}
 link = {"last_try": None, "last_ok": None, "error": None}  # estado real da comunicação com o datalogger
+# Método do medidor: "requested" = escolhido e gravado; "active" = só depois que uma amostra do datalogger foi calculada com ele
+FLOW = {"requested": load_cfg()["flow_method"], "active": None, "changed_at": int(time.time() * 1000), "confirmed_at": None,
+        "no_pulse_streak": 0}
+XCHECK_MIN_FRAC = 0.02   # comparação entre canais: corrente indicando > 2 % do span com zero pulsos...
+XCHECK_STREAK = 5        # ...por 5 amostras seguidas => "pulsos ausentes" (cabo solto, saída digital desligada ou K errado)
 
 
 def _health():
@@ -396,17 +313,78 @@ def link_view():
     rx = state["last_rx"]
     lat = list(diag["lat_ms"])
     return {"connected": fresh, "last_try_ts": link["last_try"], "last_ok_ts": ok, "error": link["error"],
-            "gaps": dl.gaps, "restarts": dl.restarts, "flow_integrated": dl.has_flow, "flow_channels": dl.channels(),
+            "gaps": dl.gaps, "flow_integrated": dl.has_flow or bool(dl.profile.get("cor")), "flow_has": list(dl.flow_has),
             "data_fresh": rx is not None and now - rx < 10_000,        # chegou amostra NOVA nos últimos 10 s
             "last_rx_ts": rx, "latency_s": round(pct(lat, .5) / 1000, 1) if lat else None,
-            "clock_skew_s": diag["health"].get("clock_offset_s"), "scan_ms": dl.scan_ms}   # desvio real do relógio (ClockCheck), não a latência
+            "clock_skew_s": diag["health"].get("clock_offset_s")}   # desvio real do relógio (ClockCheck), não a latência
+
+
+_MERGE_GROUPS = (("mass_status", "mass_g"), ("temp_status", "temp_c"),
+                 ("cor_status", "cor_ma", "flow_mode", "flow_pulses", "flow_hz", "pulses_total", "ma_code", "pulse_code", "flow_dt_ms"))
+
+
+def merge_sample(old, new):
+    """Mesma amostra (mesmo horário) lida de novo: cada grupo (balança, termopar, medidor) só é trocado se a linha gravada não
+    tinha leitura válida e a nova tem. Uma releitura nunca piora o que já foi gravado (antes, um INSERT OR REPLACE com a
+    junção vazia de uma releitura apagava temperatura e vazão de horas de histórico)."""
+    o, n = dict(zip(COLS, old)), dict(zip(COLS, new))
+    for st, *cols in _MERGE_GROUPS:
+        if o[st] != "ok" and n[st] == "ok":
+            for c in (st, *cols):
+                o[c] = n[c]
+    o["tips_total"] = n["tips_total"]   # recontado agora, com as basculadas já deduplicadas pela chave
+    return tuple(o[c] for c in COLS)
+
+
+def eval_flow(r, method, fc):
+    """Os dois canais da amostra avaliados a partir do dado bruto: (leitura do método escolhido, {canal disponível: leitura}).
+    (None, {}) = o programa não tem medidor de vazão (aguardando integração)."""
+    if not dl.has_flow or r.cor_status is None:
+        return None, {}
+    has, comm = set(r.flow_has), ("ok" if r.cor_status == "ok" else "no_comm")
+    ev = {m: calc.flow_reading(m, has, comm, r.cor_ma, r.flow_pulses, r.flow_pulse_code, r.flow_dt_ms, fc) for m in FLOW_METHODS}
+    return ev[method], {m: v for m, v in ev.items() if m in has}
+
+
+def crosscheck(ev):
+    """Comparação entre os canais, só diagnóstico (nunca altera a leitura). Corrente indicando vazão (> 2 % do span acima de
+    4 mA) com zero pulsos por XCHECK_STREAK amostras seguidas => suspeita de pulsos ausentes, que a contagem sozinha não detecta."""
+    a, p = ev.get("analog"), ev.get("pulse")
+    if not a or not p:
+        FLOW["no_pulse_streak"] = 0
+        return None
+    out = {"analog_lmin": a["lmin"], "pulse_lmin": p["lmin"], "diff_pct": None, "suspect": None}
+    if a["lmin"] is not None and p["lmin"] is not None and abs(a["lmin"]) > 1e-9:
+        out["diff_pct"] = 100.0 * (p["lmin"] - a["lmin"]) / a["lmin"]
+    flowing = a["ma_class"] in ("ok", "high") and a["ma"] > 4.0 + 16.0 * XCHECK_MIN_FRAC
+    if flowing and p["pulses"] == 0 and p["state"] in ("ok", "unconfigured"):
+        FLOW["no_pulse_streak"] += 1
+    else:
+        FLOW["no_pulse_streak"] = 0
+    if FLOW["no_pulse_streak"] >= XCHECK_STREAK:
+        out["suspect"] = "no_pulses"
+    return out
+
+
+FLOW_KEYS = ("state", "reason", "lmin", "clamp", "ma", "ma_class", "pulses", "hz", "window_s", "window_assumed", "resolution_lmin")
+
+
+def flow_payload(act, ev):
+    """Bloco 'flow' do evento ao vivo: tudo o que a tela precisa para mostrar o medidor sem decidir nada sozinha."""
+    base = {"requested": FLOW["requested"], "active": FLOW["active"], "confirmed": FLOW["active"] == FLOW["requested"],
+            "changed_at": FLOW["changed_at"], "locked": trials.has_running()}
+    if act is None:
+        return base | {"integrated": False, "has": [], "state": "na"}
+    return base | {"integrated": True, "method": act["method"], "has": sorted(ev), **{k: act[k] for k in FLOW_KEYS},
+                   "channels": {m: {k: v[k] for k in FLOW_KEYS} for m, v in ev.items()}, "crosscheck": crosscheck(ev)}
 
 
 def store_batch(batch, now):
-    """Grava um lote de Readings numa única transação. Devolve (linhas gravadas, eventos realmente novos).
-    As basculadas entram ANTES das amostras, para que `tips_total` de cada amostra já as inclua.
-    Horário repetido (releitura) só completa campos vazios (UPSERT_SQL): nunca regride uma leitura válida."""
-    events, rows, tol = [], [], load_cfg()["flow_ma_tol"]
+    """Grava um lote de Readings numa única transação. Devolve (linhas gravadas, eventos realmente novos, avaliações do medidor).
+    As basculadas entram ANTES das amostras, para que `tips_total` de cada amostra já as inclua."""
+    events, rows, flows = [], [], []
+    cfg = load_cfg()
+    fc, method = flow_cfg(cfg), cfg["flow_method"]
     with lock:
         for r in batch:
             for item in r.tips:  # cada basculada é um evento com id próprio; o INSERT OR IGNORE recusa repetidos pela chave
@@ -415,127 +393,184 @@ def store_batch(batch, now):
                 if cur.rowcount:
                     events.append({"id": cur.lastrowid, "ts": tts})
         since = count_since()
-        for r in batch:
-            if not r.sample:
-                continue
-            ts = r.ts or now
-            n = db.execute("SELECT COUNT(*) FROM tips WHERE ts>=? AND ts<=?", (since, ts)).fetchone()[0]
-            full = (ts, r.mass_g, r.temp_c, r.mass_status, r.temp_status, n, r.cor_ma, cor_class(r, tol), r.flow_mode, r.flow_pulses, r.flow_hz,
-                    r.flow_pulses_total, r.pulse_status)
-            db.execute(UPSERT_SQL, full)
-            rows.append(full)
+        samples = [r for r in batch if r.sample]
+        if samples:
+            tss = [r.ts or now for r in samples]
+            lo, hi = min(tss), max(tss)
+            # total desde "Zerar contagem": UMA contagem por lote + posição de cada amostra entre as basculadas do lote
+            base = db.execute("SELECT COUNT(*) FROM tips WHERE ts>=? AND ts<?", (since, lo)).fetchone()[0]
+            near = [t for (t,) in db.execute("SELECT ts FROM tips WHERE ts>=? AND ts<=? ORDER BY ts", (max(since, lo), hi))]
+            for r, ts in zip(samples, tss):
+                n = base + bisect_right(near, ts)
+                act, ev = eval_flow(r, method, fc)
+                hz = ev["pulse"]["hz"] if "pulse" in ev else r.flow_hz   # os dois canais ficam gravados, qualquer que seja o método
+                full = (ts, r.mass_g, r.temp_c, r.mass_status, r.temp_status, n, r.cor_ma,
+                        calc.stored_status(act) if act else None, method if act else None, r.flow_pulses, hz,
+                        r.flow_pulses_total, r.flow_ma_code, r.flow_pulse_code, r.flow_dt_ms)
+                if not db.execute(INSERT_SQL, full).rowcount:   # horário já gravado (releitura): completa, nunca piora
+                    old = tuple(db.execute(f"SELECT {','.join(COLS)} FROM samples WHERE ts=?", (ts,)).fetchone())
+                    merged = merge_sample(old, full)
+                    if merged != old:
+                        db.execute(UPDATE_SQL, merged[1:] + (ts,))
+                        diag["merged"] += 1
+                    full = merged
+                rows.append(full)
+                flows.append((act, ev))
         db.commit()
-    return rows, events
+    return rows, events, flows
 
 
 def emit_trial():
     st = trials.status()
     sio.emit("trial", st)
+    sio.emit("flow", flow_status())   # início/fim de ensaio trava/libera a troca do método do medidor
     return st
 
 
-def _emit_latest(r, full, t_rx, events):
-    fe = flow_reading(r, load_cfg())
-    s = dict(zip(COLS, full), last_tip_ts=last_tip(), new_tips=events, flow=fe, flow_lmin=fe["value_l_min"], flow_state=fe["state"],
-             flow_channels=r.flow_channels, rx_ts=t_rx)
-    state["latest"] = s
-    sio.emit("sample", s)
+class Pacer:
+    """Agenda das consultas: horário absoluto (o atraso de cada espera não se acumula) com a fase travada logo depois da
+    gravação do Scan no datalogger.
 
+    Antes: espera relativa de 1 s; o pequeno excesso de cada sleep acumulava (~0,5 ms por ciclo), a latência subia de
+    0,16 s a ~1,1 s em dente de serra e, a cada volta, o servidor pedia um registro ainda não gravado.
+    Agora: com amostra nova, a próxima consulta vem 1 período depois do início desta, menos CREEP (a fase anda devagar
+    para mais cedo); se a consulta chega antes da gravação (nenhuma amostra nova), tenta de novo em RETRY. Em regime:
+    ~1 consulta por Scan, perto do instante da gravação. Depois de MAX_RETRY tentativas sem dado novo (programa parado,
+    datalogger sem gravar), volta ao período normal: nunca martela o datalogger."""
+    CREEP, RETRY, MAX_RETRY = 0.004, 0.12, 2
 
-def poll_once():
-    """UM ciclo de aquisição: consulta o datalogger, grava, emite para a tela e avalia o ensaio. Devolve o nº de linhas novas.
-    Falha de comunicação: nada é gravado (o datalogger guarda os dados e eles são recuperados na volta); fica em link['error']."""
-    t0 = time.time()
-    now = int(t0 * 1000)
-    link["last_try"] = now
-    diag["polls"] += 1
-    try:
-        if not _comm.get("address"):
-            raise RuntimeError("Endereço do datalogger não configurado (DATALOGGER_HOST ou config.json).")
-        got = dl.read()
-        link["last_ok"], link["error"] = now, None
-        diag["consec_errors"] = 0
-        diag["poll_ms"].append((time.time() - t0) * 1000)
-    except Exception as e:
-        diag["errors"] += 1
-        diag["consec_errors"] += 1
-        msg = (str(e) or e.__class__.__name__)[:200]
-        if link["error"] != msg:
-            log.warning("Falha na leitura do datalogger: %s", msg)
-        link["error"] = msg
-        try:
-            trials.tick(int(time.time() * 1000))
-        except Exception:
-            log.exception("Falha ao avaliar o ensaio")
-        return 0
-    batch = got if isinstance(got, list) else [got]
-    diag["live"] = len(batch) <= 2
-    rows, events = store_batch(batch, now)
-    for full in rows:
-        diag["rows"] += 1
-        if diag["last_ts"] is not None and full[0] <= diag["last_ts"]:
-            diag["out_of_order"] += 1
-            if diag["out_of_order"] in (1, 10, 100) or diag["out_of_order"] % 1000 == 0:   # não inunda o log numa releitura
-                log.warning("Amostra fora de ordem ou repetida: ts=%d (última=%d); %d ocorrências", full[0], diag["last_ts"], diag["out_of_order"])
-        diag["last_ts"] = max(full[0], diag["last_ts"] or 0)
-    if rows:   # a tela recebe ANTES de gravar o cursor: nada do que acontece no disco atrasa a exibição
-        t_rx = int(time.time() * 1000)
-        diag["lat_ms"].append(t_rx - rows[-1][0])   # latência real (PC − carimbo do datalogger), de TODO ciclo com dados
-        state["last_rx"] = t_rx
-        _emit_latest([r for r in batch if r.sample][-1], rows[-1], t_rx, events)
-    if len(batch) > 2 or time.time() - t0 > 1.5:   # ciclo lento ou rajada: fica registrado para diagnóstico
-        diag["stalls"] += 1
-        if diag["stalls"] in (1, 10, 100) or diag["stalls"] % 1000 == 0:
-            log.warning("Ciclo de %.2f s com %d leituras (recuperação/atraso); %d ocorrências", time.time() - t0, len(batch), diag["stalls"])
-    dl.ack()  # o cursor só avança depois de gravado: nada se perde se o servidor cair no meio
-    try:
-        fin = trials.tick(int(time.time() * 1000))
-        if fin or state["trial_id"] or trials.has_running():   # status() calcula o parcial: só quando há ensaio
-            st = trials.status()
-            state["trial_id"] = st["running"]["id"] if st["running"] else None
-            sio.emit("trial", st)
-    except Exception:
-        log.exception("Falha ao avaliar o ensaio")
-    return len(rows)
+    def __init__(self, period):
+        self.period, self.next, self.empty = period, time.monotonic(), 0
+
+    def delay(self):
+        return max(0.0, self.next - time.monotonic())
+
+    def done(self, started, got_new):
+        if got_new or self.period > 2:
+            self.empty = 0
+            self.next = started + self.period - (self.CREEP if got_new else 0.0)
+        else:
+            self.empty += 1
+            self.next = time.monotonic() + (self.RETRY if self.empty <= self.MAX_RETRY else self.period)
+
+    def now(self):
+        self.next = time.monotonic()
 
 
 def acquire():
-    """Laço de aquisição com agenda por HORÁRIO ABSOLUTO: a consulta sai SAMPLE_PHASE s depois de cada múltiplo de SAMPLE_PERIOD
-    (o Scan de 1 s do datalogger já gravou as tabelas), sem acumular deriva entre ciclos. Se a gravação ainda não chegou, nova
-    tentativa curta (RETRY_S, até 3 vezes). Em falha de comunicação recua progressivamente (até 10 s). A thread nunca morre."""
-    summary_t, health_t, t_next = time.time(), 0.0, None
-    while True:
+    summary_t, health_t, pacer = time.time(), 0.0, Pacer(SAMPLE_PERIOD)
+    while True:   # a thread de aquisição nunca morre: qualquer erro inesperado é registrado e o ciclo seguinte continua
         try:
-            now = time.time()
-            if t_next is None or t_next < now - SAMPLE_PERIOD:   # primeira volta, ou atraso grande (recuperação): realinha
-                t_next = (math.floor(now / SAMPLE_PERIOD) + 1) * SAMPLE_PERIOD + SAMPLE_PHASE
-            if t_next > now:
-                sio.sleep(t_next - now)
-            n = poll_once()
-            if n == 0 and link["error"] is None and link["last_ok"] is not None:
-                for _ in range(3):
-                    sio.sleep(RETRY_S)
-                    diag["retries"] += 1
-                    if poll_once() or link["error"]:
-                        break
-            if link["error"]:   # recuo progressivo (até 10 s): não martela um datalogger/rede que já está com problema
-                sio.sleep(min(10.0, SAMPLE_PERIOD * 2 ** min(diag["consec_errors"], 5)))
-                t_next = None
-            else:
-                t_next += SAMPLE_PERIOD
-            if time.time() - health_t > 3600:   # diagnóstico leve (2 consultas) uma vez por hora, em outra thread: nunca atrasa a aquisição
-                health_t = time.time()
-                sio.start_background_task(_health)
-            if time.time() - summary_t > 60:   # um resumo por minuto: suficiente para diagnosticar sem inflar o log
-                summary_t = time.time()
-                lat, pm = list(diag["lat_ms"]), list(diag["poll_ms"])
-                log.info("resumo: consultas=%d erros=%d amostras=%d retentativas=%d lat(PC-datalogger) p50=%s p95=%s ms consulta p50=%s p95=%s ms "
-                         "lacunas=%d reinicios=%d sem-correspondencia=%s", diag["polls"], diag["errors"], diag["rows"], diag["retries"], pct(lat, .5),
-                         pct(lat, .95), pct(pm, .5), pct(pm, .95), dl.gaps, dl.restarts, dl.join_miss)
+            summary_t, health_t = _acquire_once(summary_t, health_t, pacer)
         except Exception:
             log.exception("Erro inesperado no ciclo de aquisição; continuando")
             sio.sleep(SAMPLE_PERIOD)
-            t_next = None
+            pacer.now()
+
+
+def _confirm_method(act, t_rx):
+    """O método só vira 'ativo' quando uma amostra do datalogger foi calculada com ele (canal presente no programa)."""
+    if act is None:
+        return
+    with flow_lock:
+        confirm = act["method"] == FLOW["requested"] and act["state"] != "unavailable" and FLOW["active"] != act["method"]
+        lost = act["state"] == "unavailable" and FLOW["active"] is not None
+        if confirm:
+            FLOW["active"], FLOW["confirmed_at"] = act["method"], t_rx
+        elif lost:
+            FLOW["active"], FLOW["confirmed_at"] = None, None
+    if confirm:
+        log.info("medidor de vazão: método %s confirmado por dado do datalogger", METHOD_LABEL[act["method"]])
+    elif lost:
+        log.warning("medidor de vazão: o programa do datalogger deixou de fornecer o canal do método %s", METHOD_LABEL[act["method"]])
+    if confirm or lost:
+        sio.emit("flow", flow_status())
+
+
+def _acquire_once(summary_t, health_t, pacer):
+    sio.sleep(pacer.delay())
+    if True:
+        m0, t0 = time.monotonic(), time.time()
+        now = int(t0 * 1000)
+        link["last_try"] = now
+        diag["polls"] += 1
+        try:
+            if not _comm.get("address"):
+                raise RuntimeError("Endereço do datalogger não configurado (DATALOGGER_HOST ou config.json).")
+            got = dl.read()
+            link["last_ok"], link["error"] = now, None
+            diag["consec_errors"] = 0
+            diag["poll_ms"].append((time.time() - t0) * 1000)
+        except Exception as e:  # falha de comunicação: nada é gravado; o datalogger guarda os dados e recuperamos na volta
+            diag["errors"] += 1
+            diag["consec_errors"] += 1
+            msg = (str(e) or e.__class__.__name__)[:200]
+            if link["error"] != msg:
+                log.warning("Falha na leitura do datalogger: %s", msg)
+            link["error"] = msg
+            # recuo progressivo (até 10 s): não martela um datalogger/rede que já está com problema
+            sio.sleep(min(10.0, SAMPLE_PERIOD * 2 ** min(diag["consec_errors"], 5)))
+            pacer.now()
+            try:
+                trials.tick(int(time.time() * 1000))
+            except Exception:
+                log.exception("Falha ao avaliar o ensaio")
+            return summary_t, health_t
+        batch = got if isinstance(got, list) else [got]
+        diag["live"] = len(batch) <= 2
+        rows, events, flows = store_batch(batch, now)
+        if not rows:
+            diag["empty_polls"] += 1
+        pacer.done(m0, bool(rows))
+        for full in rows:
+            diag["rows"] += 1
+            if diag["last_ts"] is not None and full[0] <= diag["last_ts"]:
+                diag["out_of_order"] += 1
+                if diag["out_of_order"] in (1, 10, 100) or diag["out_of_order"] % 1000 == 0:   # não inunda o log numa releitura
+                    log.warning("Amostra fora de ordem ou repetida: ts=%d (última=%d); %d ocorrências", full[0], diag["last_ts"], diag["out_of_order"])
+            diag["last_ts"] = max(full[0], diag["last_ts"] or 0)
+        last = rows[-1] if rows else None
+        if last:   # a tela recebe ANTES de gravar o cursor: nada do que acontece no disco atrasa a exibição
+            t_rx = int(time.time() * 1000)
+            diag["lat_ms"].append(t_rx - last[0])   # latência real (PC − carimbo do datalogger), de TODO ciclo com dados
+            state["last_rx"] = t_rx
+            act, ev = flows[-1]
+            _confirm_method(act, t_rx)
+            fp = flow_payload(act, ev)
+            s = dict(zip(COLS, last), last_tip_ts=last_tip(), new_tips=events, flow_lmin=fp.get("lmin"), flow_state=fp["state"],
+                     rx_ts=t_rx, flow=fp)
+            state["latest"] = s
+            sio.emit("sample", s)
+        if len(batch) > 2 or time.time() - t0 > 1.5:   # ciclo lento ou rajada: fica registrado para diagnóstico
+            diag["stalls"] += 1
+            if diag["stalls"] in (1, 10, 100) or diag["stalls"] % 1000 == 0:
+                log.warning("Ciclo de %.2f s com %d leituras (recuperação/atraso); %d ocorrências", time.time() - t0, len(batch), diag["stalls"])
+        dl.ack()  # o cursor só avança depois de gravado: nada se perde se o servidor cair no meio
+        try:
+            fin = trials.tick(int(time.time() * 1000))
+            if fin or state["trial_id"] or trials.has_running():   # status() calcula o parcial: só quando há ensaio
+                st = trials.status()
+                state["trial_id"] = st["running"]["id"] if st["running"] else None
+                sio.emit("trial", st)
+                if fin:
+                    sio.emit("flow", flow_status())
+        except Exception:
+            log.exception("Falha ao avaliar o ensaio")
+        if time.time() - health_t > 3600:   # diagnóstico leve (2 consultas) uma vez por hora, em outra thread: nunca atrasa a aquisição
+            health_t = time.time()
+            sio.start_background_task(_health)
+        if time.time() - summary_t > 60:   # um resumo por minuto: suficiente para diagnosticar sem inflar o log
+            summary_t = time.time()
+            lat, pm = list(diag["lat_ms"]), list(diag["poll_ms"])
+            log.info("resumo: consultas=%d (sem dado novo=%d) erros=%d amostras=%d lat(PC-datalogger) p50=%s p95=%s ms consulta p50=%s "
+                     "p95=%s ms lacunas=%d reinicios=%d releituras-completadas=%d sem-correspondencia=%s", diag["polls"],
+                     diag["empty_polls"], diag["errors"], diag["rows"], pct(lat, .5), pct(lat, .95), _ms(pct(pm, .5)), _ms(pct(pm, .95)),
+                     dl.gaps, dl.restarts, diag["merged"], dl.join_miss)
+        return summary_t, health_t
+
+
+def _ms(v):
+    return None if v is None else round(v)
 
 
 # ---------- segurança ----------
@@ -577,35 +612,46 @@ def relatorio(tid):
 @app.get("/api/summary")
 def summary():
     fr, to = rng()
-    cfg = load_cfg()
-    res = cfg["tip_resolution_mm"]
+    cfg, res = load_cfg(), load_cfg()["tip_resolution_mm"]
     smp = [r[0] for r in q("SELECT ts FROM samples WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))]
     tps = [r[0] for r in q("SELECT ts FROM tips WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))]
     period = calc.precip_period(tps, smp, fr, to, res) | {"from": fr, "to": to}
     return jsonify(latest=state["latest"], link=link_view(), now=int(time.time() * 1000), mode=MODE, period=period,
                    tips_total=tips_total(), count_since=count_since(), last_tip_ts=last_tip(),
-                   stats=stats("ts>=? AND ts<?", [fr, to], cfg), grav=period_grav(fr, to, cfg), resolution=res, area_cm2=cfg["catch_area_cm2"])
+                   stats=stats("ts>=? AND ts<?", [fr, to]), grav=period_grav(fr, to), resolution=res, area_cm2=cfg["catch_area_cm2"],
+                   flow=flow_status())
 
 
 @app.get("/api/series")
 def series():
     fr, to = rng()
     cfg = load_cfg()
-    rows = q("SELECT ts,mass_g,temp_c,cor_ma,cor_status,flow_mode,flow_hz,flow_pulses,pulse_status FROM samples WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))
+    rows = q("SELECT ts,mass_g,temp_c,cor_ma,cor_status,flow_mode,flow_hz FROM samples WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))
     ts = [r[0] for r in rows]
-    fl = [flow_row({"cor_ma": r[3], "cor_status": r[4], "flow_pulses": r[7], "pulse_status": r[8]}, cfg)[0] for r in rows]
+    fc, memo, fl = flow_cfg(cfg), {}, []
+    for r in rows:   # a vazão só depende do método, do canal que ele usa e do estado: valor repetido não é recalculado
+        x = r[6] if r[5] == "pulse" else r[3]
+        if not x:    # None, 0,0 ou -0,0 (o sinal do zero chega ao JSON e as duas chaves seriam iguais): calcula direto
+            fl.append(flow_value(r[5], r[3], r[6], r[4], fc=fc)[0])
+            continue
+        key = (r[5], x, r[4])
+        fv = memo.get(key, memo)
+        if fv is memo:
+            fv = memo[key] = flow_value(r[5], r[3], r[6], r[4], fc=fc)[0]
+        fl.append(fv)
     cols = {"mass": [r[1] for r in rows], "temp": [r[2] for r in rows], "cor_ma": [r[3] if r[4] == "ok" else None for r in rows], "flow": fl,
-            "hz": [r[6] if r[8] == "ok" else None for r in rows]}
-    step = len(ts) // 600 + 1
+            "hz": [r[6] if r[4] == "ok" and r[5] == "pulse" else None for r in rows]}
+    n = len(ts)
+    step = n // 600 + 1
     out = {"t": [], **{k: [] for k in cols}}
-    for i in range(0, len(ts), step):   # no máx. ~600 pontos: cada ponto = média das leituras válidas do trecho
-        ch = range(i, min(i + step, len(ts)))
-        out["t"].append(ts[ch[-1]])
+    for i in range(0, n, step):   # no máx. ~600 pontos: cada ponto = média das leituras válidas do trecho
+        j = min(i + step, n)
+        out["t"].append(ts[j - 1])
         for k, v in cols.items():
-            vals = [v[j] for j in ch if v[j] is not None]
+            vals = [y for y in v[i:j] if y is not None]
             out[k].append(round(sum(vals) / len(vals), 3) if vals else None)
-    out["flow_mode"] = cfg["flow_method"]
-    out["stats"] = stats("ts>=? AND ts<?", [fr, to], cfg)
+    out["flow_mode"] = next((r[5] for r in reversed(rows) if r[5]), None)
+    out["stats"] = stats("ts>=? AND ts<?", [fr, to])
     out["tips"] = [r[0] for r in q("SELECT ts FROM tips WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))]
     return jsonify(out)
 
@@ -658,11 +704,11 @@ def hist_where():
     fr, to = rng()
     sensor, st = request.args.get("sensor", "all"), request.args.get("state", "all")
     where, a = ["ts>=? AND ts<?"], [fr, to]
-    cols = {"mass": ["mass_status"], "temp": ["temp_status"], "cor": ["cor_status", "pulse_status"], "tips": []}.get(
+    cols = {"mass": ["mass_status"], "temp": ["temp_status"], "cor": ["cor_status"], "tips": []}.get(
         sensor, ["mass_status", "temp_status", "cor_status"])
     if cols and st == "ok":
         where.append(" AND ".join(f"COALESCE({c},'ok')='ok'" for c in cols))
-    elif cols and st in ("no_comm", "invalid", "out_of_range", "fail"):
+    elif cols and st in ("no_comm", "invalid", "out_of_range"):
         where.append("(" + " OR ".join(f"{c}='{st}'" for c in cols) + ")")
     return " AND ".join(where), a
 
@@ -674,16 +720,16 @@ def history():
     total = q(f"SELECT COUNT(*) FROM samples WHERE {where}", a)[0][0]
     rows = q(f"SELECT {','.join(COLS)} FROM samples WHERE {where} ORDER BY ts DESC LIMIT ? OFFSET ?", a + [lim, off])
     cfg, out = load_cfg(), []
+    fc = flow_cfg(cfg)
     for r in rows:
         d = dict(zip(COLS, r))
-        d["flow_lmin"], d["flow_state"] = flow_row(d, cfg)
+        d["flow_lmin"], d["flow_state"] = flow_value(d["flow_mode"], d["cor_ma"], d["flow_hz"], d["cor_status"], fc=fc)
         out.append(d)
-    return jsonify(total=total, rows=out, stats=stats(where, a, cfg), resolution=cfg["tip_resolution_mm"])
+    return jsonify(total=total, rows=out, stats=stats(where, a), resolution=cfg["tip_resolution_mm"])
 
 
-def estado(ms, ts, cs, ps=None):
-    parts = [f"{LAB[s]} ({n})" for s, n in ((ms, "balança"), (ts, "termopar"), (cs, "medidor de vazão, 4–20 mA"), (ps, "medidor de vazão, pulsos"))
-             if s not in ("ok", None)]
+def estado(ms, ts, cs):
+    parts = [f"{LAB[s]} ({n})" for s, n in ((ms, "balança"), (ts, "termopar"), (cs, "medidor de vazão")) if s not in ("ok", None)]
     return "; ".join(parts) or "Válida"
 
 
@@ -696,16 +742,16 @@ def export_table():
     m_on, t_on, c_on, p_on = (sensor in ("all", "mass"), sensor in ("all", "temp"), sensor in ("all", "cor"),
                               sensor in ("all", "tips"))
     head = ["Data e hora"] + (["Massa (g)"] if m_on else []) + (["Temperatura (°C)"] if t_on else []) \
-        + (["Medidor de Vazão (mA)", "Pulsos (contagem no Scan)", "Pulsos acumulados (datalogger)", "Frequência (Hz)", f"Vazão (L/min, método {cfg['flow_method']})"] if c_on else []) \
+        + (["Medidor de Vazão (mA)", "Pulsos (contagem em 1 s)", "Frequência (Hz)", "Vazão (L/min)", "Método do cálculo",
+            "Janela de contagem (s)", "Pulsos acumulados (datalogger)"] if c_on else []) \
         + (["Basculadas (total desde zerar)", "Precipitação acumulada desde zerar (mm)"] if p_on else []) + ["Estado"]
-    out = []
-    for r in rows:
-        d = dict(zip(COLS, r))
-        out.append([datetime.fromtimestamp(d["ts"] / 1000)] + ([d["mass_g"]] if m_on else []) + ([d["temp_c"]] if t_on else [])
-                   + ([d["cor_ma"], d["flow_pulses"], d["flow_pulses_total"], d["flow_hz"], flow_row(d, cfg)[0]] if c_on else [])
-                   + ([d["tips_total"], round(d["tips_total"] * res, 3) if res else None] if p_on else [])
-                   + [estado(d["mass_status"] if m_on else "ok", d["temp_status"] if t_on else "ok", d["cor_status"] if c_on else "ok",
-                             d["pulse_status"] if c_on else None)])
+    out, fc = [], flow_cfg(cfg)
+    for ts, m, t, ms, tst, n, ma, cs, mode, pul, hz, ptot, _mc, _pc, dtms in rows:
+        fl, fst = flow_value(mode, ma, hz, cs, fc=fc)
+        out.append([datetime.fromtimestamp(ts / 1000)] + ([m] if m_on else []) + ([t] if t_on else [])
+                   + ([ma, pul, hz, fl, METHOD_LABEL.get(mode, ""), None if dtms is None else dtms / 1000, ptot] if c_on else [])
+                   + ([n, round(n * res, 3) if res else None] if p_on else [])
+                   + [estado(ms if m_on else "ok", tst if t_on else "ok", ("fault" if fst == "fault" else cs) if c_on else "ok")])
     return head, out
 
 
@@ -761,52 +807,6 @@ def export_events():
                     headers={"Content-Disposition": "attachment; filename=eventos-basculamento.csv"})
 
 
-# ---------- medidor de vazão: estado e método ----------
-def flow_view():
-    """Estado atual do medidor: método solicitado × ativo, canais do programa, dado bruto, valor e motivo."""
-    cfg, s = load_cfg(), state["latest"] or {}
-    if s:   # reavalia a última amostra com a configuração ATUAL (método/K podem ter mudado depois dela)
-        fe = flow_eval(cfg, s.get("flow_channels") or dl.channels(), s.get("cor_ma"), "ok" if s.get("cor_ma") is not None else s.get("cor_status"),
-                       s.get("flow_pulses"), s.get("pulse_status"), dl.scan_ms / 1000.0, dl.has_flow)
-    else:
-        fe = flow_eval(cfg, dl.channels(), None, None, None, None, dl.scan_ms / 1000.0, dl.has_flow)
-    return fe | {"raw": {"ma": s.get("cor_ma"), "pulses": s.get("flow_pulses"), "pulses_total": s.get("flow_pulses_total"), "hz": s.get("flow_hz")},
-                 "k": {"value": cfg["flow_k_value"], "unit": cfg["flow_k_unit"], "pulses_per_l": cfg["flow_k_pulses_per_l"]},
-                 "ma_tol": cfg["flow_ma_tol"], "range": cfg["cor"], "scan_ms": dl.scan_ms, "ts": s.get("ts"),
-                 "trial_running": trials.has_running(), "state_label": LAB.get(fe["state"], "")}
-
-
-@app.get("/api/flow")
-def flow_api():
-    return jsonify(flow_view())
-
-
-@app.post("/api/flow/method")
-@guarded
-def flow_method():
-    """Troca o método (analógico | pulsos). Recusada durante um ensaio e quando o programa em execução não tem o canal.
-    Nada é escrito no datalogger: ele mede os dois canais sempre; a escolha vale para o cálculo no servidor."""
-    m = (request.get_json(silent=True) or {}).get("method")
-    if m not in FLOW_METHODS:
-        return jsonify(error="Método inválido: use 'analog' ou 'pulse'."), 400
-    if trials.has_running():
-        return jsonify(error="Há um ensaio em andamento: o método não pode ser trocado até ele terminar."), 409
-    ch = dl.channels()
-    if dl.has_flow and dl.fields.get((dl.profile.get("flow") or {}).get("table")) and not ch.get(m):
-        return jsonify(error=("O programa em execução no datalogger não fornece o canal de pulsos (P2): carregue o Pluviometria_v4_vazao_pulsos.CR1X."
-                              if m == "pulse" else "O programa em execução não fornece o canal analógico (RG1).")), 400
-    cfg = copy.deepcopy(load_cfg())
-    cfg["flow_method"] = m
-    _save_cfg(cfg)
-    log.info("método do medidor de vazão: %s", m)
-    s = state["latest"]
-    if s:   # a última amostra é reavaliada com o método novo (dado bruto já gravado); o 'ativo' só muda quando o cálculo acontece
-        fe = flow_view()
-        s.update(flow={k: fe[k] for k in ("method", "active", "channels", "state", "reason", "value_l_min")}, flow_lmin=fe["value_l_min"], flow_state=fe["state"])
-        sio.emit("sample", s)
-    return jsonify(flow_view() | {"config": public_cfg(cfg)})
-
-
 # ---------- ensaios ----------
 def _trial_err(e):
     return jsonify(error=e.msg), e.status
@@ -828,9 +828,9 @@ def trial_get(tid):
 def trial_start():
     kind = (request.get_json(silent=True) or {}).get("kind")
     lv = link_view()
-    fe = flow_view() if kind == "flow" else None
-    if fe and fe["state"] in ("na", "unavailable"):
-        return jsonify(error="Ensaio do medidor de vazão: " + (fe["reason"] or LAB[fe["state"]])), 409
+    if kind == "flow" and dl.has_flow and FLOW["active"] != FLOW["requested"]:   # nunca ensaiar com um método ainda não confirmado
+        return jsonify(error=f"O método {METHOD_LABEL[FLOW['requested']]} do medidor ainda não foi confirmado por dado do datalogger. "
+                             "Aguarde a confirmação no card de Vazão ou volte ao método anterior."), 409
     try:
         t = trials.start(kind, lv["connected"] and lv["data_fresh"])
     except TrialError as e:
@@ -858,13 +858,12 @@ def trial_raw(tid):
     s, _ = trials.raw(tid)
     cfg = t["cfg"]
     head = ["Data e hora (datalogger)", "Massa (g)", "Temperatura (°C)", "Estado da massa", "Estado da temperatura",
-            "Medidor de Vazão (mA)", "Estado 4–20 mA", "Modo (datalogger)", "Pulsos (contagem no Scan)", "Frequência (Hz)",
-            "Pulsos acumulados (datalogger)", "Estado pulsos", f"Vazão (L/min, método {cfg.get('method', 'analog')})"]
-    rows = []
-    for r in s:
-        d = dict(zip(TRIAL_COLS, r))
-        rows.append([datetime.fromtimestamp(d["ts"] / 1000), d["mass_g"], d["temp_c"], d["mass_status"], d["temp_status"], d["cor_ma"], d["cor_status"],
-                     d["flow_mode"], d["flow_pulses"], d["flow_hz"], d["flow_pulses_total"], d["pulse_status"], trial_flow_of_row(d, cfg)])
+            "Medidor de Vazão (mA)", "Estado do medidor", "Modo do medidor", "Pulsos (contagem em 1 s)", "Frequência (Hz)", "Vazão (L/min)",
+            "Pulsos acumulados (datalogger)", "Código do canal analógico", "Código do canal de pulsos", "Janela de contagem (ms)"]
+    rows = [[datetime.fromtimestamp(r[0] / 1000), r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9],
+             calc.flow_from_sample(r[7] or "analog", r[6] if r[6] is not None else "ok", r[9], r[5], cfg.get("k_pulses_per_l"),
+                                   cfg.get("q4"), cfg.get("q20"), cfg.get("range_unit"), cfg.get("density"), cfg.get("ma_tol", 0.0)),
+             r[10], r[11], r[12], r[13]] for r in s]
     return csv_response(head, rows, f"ensaio-{tid}-amostras.csv")
 
 
@@ -882,19 +881,20 @@ def trial_tips(tid):
 def diag_api():
     lat, pm = list(diag["lat_ms"]), list(diag["poll_ms"])
     return jsonify(link=link_view(), polls=diag["polls"], errors=diag["errors"], rows=diag["rows"], out_of_order=diag["out_of_order"],
-                   gaps=dl.gaps, restarts=dl.restarts, stalls=diag["stalls"], retries=diag["retries"], join_miss=dl.join_miss, health=diag["health"],
-                   sample_period_s=SAMPLE_PERIOD, sample_phase_s=SAMPLE_PHASE, started=diag["started"],
+                   empty_polls=diag["empty_polls"], merged=diag["merged"], flow=flow_status(),
+                   gaps=dl.gaps, restarts=dl.restarts, stalls=diag["stalls"], join_miss=dl.join_miss, health=diag["health"], sample_period_s=SAMPLE_PERIOD, started=diag["started"],
                    lat_ms={"p50": pct(lat, .5), "p95": pct(lat, .95), "max": max(lat) if lat else None},
                    poll_ms={"p50": pct(pm, .5), "p95": pct(pm, .95), "max": max(pm) if pm else None},
-                   write_protected=bool(DASHBOARD_TOKEN), fields=dl.fields)
+                   write_protected=bool(DASHBOARD_TOKEN))
 
 
 # ---------- configuração ----------
 def public_cfg(cfg):
     c = copy.deepcopy(cfg)
     c["comm"].pop("address", None)   # o endereço do datalogger não é exibido nem editável pela interface
-    return c | {"active_mode": MODE, "write_protected": bool(DASHBOARD_TOKEN), "scan_ms": dl.scan_ms, "k_units": list(K_UNITS),
-                "flow_channels": dl.channels(), "duration_min_ms": dl.scan_ms}
+    return c | {"active_mode": MODE, "write_protected": bool(DASHBOARD_TOKEN),
+                "flow_k_value": calc.k_from_pulses_per_l(cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"]),   # K na unidade de exibição
+                "flow_k_units": list(calc.K_UNITS), "ma_fault": calc.MA_FAULT}
 
 
 @app.get("/api/config")
@@ -930,26 +930,17 @@ def positive(x, label):
     return v
 
 
-def _save_cfg(cfg):
-    global _cfg
-    tmp = CFG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:   # gravação atômica: queda de energia não deixa config.json pela metade
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, CFG_PATH)
-    _cfg = cfg
-
-
 @app.post("/api/config")
 @guarded
 def set_config():
-    """Configuração PARCIAL: só o que veio no corpo muda; campo ausente preserva o valor salvo; campo numérico "" apaga."""
+    """Atualização PARCIAL: cada campo ausente preserva o valor salvo; "" apaga um parâmetro numérico opcional."""
     d, cfg = request.get_json(silent=True) or {}, copy.deepcopy(load_cfg())
     try:
-        for key, units in (("mass_unit", MASS_UNITS), ("temp_unit", TEMP_UNITS), ("flow_unit", FLOW_UNITS)):
-            if key in d:
-                if d[key] not in units:
-                    raise ValueError("Unidade inválida.")
-                cfg[key] = d[key]
+        for k, allowed, label in (("mass_unit", MASS_UNITS, "massa"), ("temp_unit", TEMP_UNITS, "temperatura"), ("flow_unit", FLOW_UNITS, "vazão")):
+            if k in d:
+                if d[k] not in allowed:
+                    raise ValueError(f"Unidade de {label} inválida.")
+                cfg[k] = d[k]
         for k, label in (("mass_decimals", "Casas decimais da massa"), ("temp_decimals", "Casas decimais da temperatura"),
                          ("flow_decimals", "Casas decimais da vazão")):
             if k in d:
@@ -957,56 +948,46 @@ def set_config():
         for k, label in (("tip_resolution_mm", "Resolução"), ("density_g_cm3", "Densidade"), ("catch_area_cm2", "Área de captação")):
             if k in d:
                 cfg[k] = positive(d[k], label)
+        if "flow_k" in d:   # fator K como o operador digita: {"value": ..., "unit": "pulsos/L" | "pulsos/m³" | "L/pulso" | "mL/pulso"}
+            fk = d["flow_k"] or {}
+            unit = fk.get("unit", cfg["flow_k_unit"])
+            if unit not in calc.K_UNITS:
+                raise ValueError("Unidade do fator K inválida.")
+            v = positive(fk.get("value"), "Fator K")
+            cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"] = (None if v is None else calc.k_to_pulses_per_l(v, unit)), unit
+        elif "flow_k_pulses_per_l" in d:   # formato antigo: sempre pulsos/L
+            cfg["flow_k_pulses_per_l"] = positive(d["flow_k_pulses_per_l"], "Fator K")
+        if "flow_k_unit" in d and "flow_k" not in d:
+            if d["flow_k_unit"] not in calc.K_UNITS:
+                raise ValueError("Unidade do fator K inválida.")
+            cfg["flow_k_unit"] = d["flow_k_unit"]
+        if "flow_ma_tol" in d:
+            tol = num(d["flow_ma_tol"], "Tolerância nos limites de 4 e 20 mA")
+            if not 0 <= tol <= 0.2:
+                raise ValueError("Tolerância nos limites de 4 e 20 mA: use de 0 a 0,2 mA.")
+            cfg["flow_ma_tol"] = tol
         if "default_range_s" in d:
             cfg["default_range_s"] = whole(d["default_range_s"], "Período inicial", 1, 31 * 86400)
-        # ---- medidor de vazão: método, fator K (com unidade), tolerância do 4–20 mA
-        if "flow_method" in d:
-            if d["flow_method"] not in FLOW_METHODS:
-                raise ValueError("Método do medidor inválido (analog | pulse).")
-            cfg["flow_method"] = d["flow_method"]
-        if "flow_k_unit" in d:
-            if d["flow_k_unit"] not in K_UNITS:
-                raise ValueError("Unidade do fator K inválida: use " + ", ".join(K_UNITS) + ".")
-            cfg["flow_k_unit"] = d["flow_k_unit"]
-        if "flow_k_value" in d:
-            cfg["flow_k_value"] = positive(d["flow_k_value"], "Fator K")
-        elif "flow_k_pulses_per_l" in d:   # corpo antigo: só o valor normalizado
-            cfg["flow_k_value"], cfg["flow_k_unit"] = positive(d["flow_k_pulses_per_l"], "Fator K"), "pulsos/L"
-        cfg["flow_k_pulses_per_l"] = calc.k_to_pulses_per_l(cfg["flow_k_value"], cfg["flow_k_unit"])
-        if cfg["flow_k_value"] is not None and cfg["flow_k_pulses_per_l"] is None:
-            raise ValueError("Fator K inválido para a unidade escolhida.")
-        if "flow_ma_tol" in d:
-            v = num(d["flow_ma_tol"], "Tolerância do 4–20 mA")
-            if not 0 <= v <= 1:
-                raise ValueError("Tolerância do 4–20 mA: use um valor entre 0 e 1 mA.")
-            cfg["flow_ma_tol"] = v
-        # ---- duração do ensaio: internamente em ms; mínimo = resolução efetiva do datalogger (Scan)
-        if "trial_duration_ms" in d:
-            ms = whole(d["trial_duration_ms"], "Duração do ensaio", 1, TRIAL_MAX_MS)
-            if ms < dl.scan_ms:
-                raise ValueError(f"Duração do ensaio: mínimo {dl.scan_ms} ms, que é a resolução efetiva do datalogger (Scan de {dl.scan_ms} ms). "
-                                 "Valores menores não podem ser medidos com o programa atual.")
-            cfg["trial_duration_ms"] = ms
-        elif "trial_duration_s" in d:
-            cfg["trial_duration_ms"] = whole(d["trial_duration_s"], "Duração do ensaio", 1, TRIAL_MAX_MS // 1000) * 1000
-            if cfg["trial_duration_ms"] < dl.scan_ms:
-                raise ValueError(f"Duração do ensaio: mínimo {dl.scan_ms} ms (resolução efetiva do datalogger).")
-        if "trial_duration_unit" in d:
-            if d["trial_duration_unit"] not in DUR_UNITS:
-                raise ValueError("Unidade da duração inválida (ms | s | min).")
-            cfg["trial_duration_unit"] = d["trial_duration_unit"]
-        c = d.get("cor")
-        if c is not None:
-            unit = c.get("unit", cfg["cor"]["unit"])
+        if "trial_duration_s" in d:
+            cfg["trial_duration_s"] = whole(d["trial_duration_s"], "Duração do ensaio", 10, 6 * 3600)
+        if "cor" in d:
+            c, cur = d["cor"] or {}, cfg["cor"]
+            unit = c.get("unit", cur["unit"])
             if unit not in FLOW_UNITS:
                 raise ValueError("Unidade de vazão da faixa inválida.")
-            q4 = opt_num(c["q4"], "Vazão em 4 mA") if "q4" in c else cfg["cor"]["q4"]
-            q20 = opt_num(c["q20"], "Vazão em 20 mA") if "q20" in c else cfg["cor"]["q20"]
+            q4 = opt_num(c["q4"], "Vazão em 4 mA") if "q4" in c else cur["q4"]
+            q20 = opt_num(c["q20"], "Vazão em 20 mA") if "q20" in c else cur["q20"]
             if (q4 is None) != (q20 is None):
                 raise ValueError("Informe a vazão em 4 mA e em 20 mA, ou deixe as duas vazias.")
             if q4 is not None and q4 == q20:
                 raise ValueError("A vazão em 20 mA não pode ser igual à vazão em 4 mA.")
             cfg["cor"] = {"q4": q4, "q20": q20, "unit": unit}
+        method = d.get("flow_method")
+        if method is not None and method != FLOW["requested"]:
+            err = method_refusal(method)
+            if err:
+                raise ValueError(err[1])
+            cfg["flow_method"] = method
         # Comunicação: só atualiza o que veio preenchido e é válido. O ENDEREÇO nunca vem da interface; campos ausentes
         # ou vazios preservam o valor atual (nada é gravado como "" por acidente).
         cm, cur = d.get("comm") or {}, cfg["comm"]
@@ -1019,15 +1000,85 @@ def set_config():
             cur["protocol"] = cm["protocol"]
         if str(cm.get("user") or "").strip():
             cur["user"] = str(cm["user"]).strip()
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, AttributeError):
         return jsonify(error="Valores inválidos."), 400
     except ValueError as e:
         return jsonify(error=str(e)), 400
-    _normalize_cfg(cfg)
-    _save_cfg(cfg)
-    log.info("configuração salva (resolução=%s, área=%s, método=%s, K=%s %s, duração do ensaio=%s ms)", cfg["tip_resolution_mm"], cfg["catch_area_cm2"],
-             cfg["flow_method"], cfg["flow_k_value"], cfg["flow_k_unit"], cfg["trial_duration_ms"])
-    return jsonify(public_cfg(cfg))
+    save_cfg(cfg)
+    if cfg["flow_method"] != FLOW["requested"]:
+        set_requested(cfg["flow_method"])
+    log.info("configuração salva (resolução=%s, área=%s, K=%s pulsos/L (exibido em %s), faixa 4–20 mA=%s..%s %s, tolerância=%s mA, "
+             "duração do ensaio=%ss)", cfg["tip_resolution_mm"], cfg["catch_area_cm2"], cfg["flow_k_pulses_per_l"], cfg["flow_k_unit"],
+             cfg["cor"]["q4"], cfg["cor"]["q20"], cfg["cor"]["unit"], cfg["flow_ma_tol"], cfg["trial_duration_s"])
+    pc = public_cfg(cfg)
+    sio.emit("config", pc)   # outras abas abertas passam a usar a mesma configuração
+    return jsonify(pc)
+
+
+# ---------- medidor de vazão: método de aquisição ----------
+flow_lock = threading.Lock()
+
+
+def flow_status():
+    """Estado do medidor para a interface: método escolhido × confirmado por dado do datalogger, canais que o programa
+    fornece e bloqueio durante ensaio. Os parâmetros vêm do config.json (fonte única)."""
+    cfg = load_cfg()
+    k = cfg["flow_k_pulses_per_l"]
+    return {"integrated": dl.has_flow, "has": list(dl.flow_has), "requested": FLOW["requested"], "active": FLOW["active"],
+            "confirmed": FLOW["active"] == FLOW["requested"], "changed_at": FLOW["changed_at"], "confirmed_at": FLOW["confirmed_at"],
+            "locked": trials.has_running(),
+            "params": {"k_pulses_per_l": k, "k_unit": cfg["flow_k_unit"], "k_value": calc.k_from_pulses_per_l(k, cfg["flow_k_unit"]),
+                       "resolution_lmin_1s": calc.pulse_resolution_l_min(k, 1.0), "ma_tol": cfg["flow_ma_tol"],
+                       "q4": cfg["cor"]["q4"], "q20": cfg["cor"]["q20"], "range_unit": cfg["cor"]["unit"]}}
+
+
+def method_refusal(m):
+    """(status HTTP, motivo) para recusar a troca do método, ou None se a troca é segura."""
+    if m not in FLOW_METHODS:
+        return 400, "Método inválido: use 'analog' (4–20 mA) ou 'pulse' (pulsos)."
+    if not dl.has_flow:
+        return 409, "O perfil do datalogger em uso não tem o medidor de vazão."
+    if trials.has_running():
+        return 409, "Há um ensaio em andamento: o método do medidor só pode mudar depois que ele terminar."
+    if not dl.flow_has:
+        return 409, "Ainda não houve leitura do datalogger para confirmar quais canais o programa fornece. Aguarde a comunicação."
+    if m not in dl.flow_has:
+        return 409, ("O programa carregado no datalogger não fornece o canal de pulsos (P2). Carregue "
+                     "crbasic/Pluviometria_v4_vazao_pulsos.CR1X para usar este método." if m == "pulse"
+                     else "O programa carregado no datalogger não fornece o canal 4–20 mA.")
+    return None
+
+
+def set_requested(m):
+    """Novo método gravado: deixa de ser 'ativo' até que uma amostra do datalogger seja calculada com ele."""
+    with flow_lock:
+        old = FLOW["requested"]
+        FLOW.update(requested=m, active=None, changed_at=int(time.time() * 1000), confirmed_at=None, no_pulse_streak=0)
+    log.info("medidor de vazão: método alterado de %s para %s; aguardando confirmação por dado do datalogger",
+             METHOD_LABEL.get(old, old), METHOD_LABEL[m])
+    sio.emit("flow", flow_status())
+
+
+@app.get("/api/flow")
+def flow_get():
+    return jsonify(flow_status())
+
+
+@app.post("/api/flow/method")
+@guarded
+def flow_method_set():
+    m = (request.get_json(silent=True) or {}).get("method")
+    if m == FLOW["requested"] and m in FLOW_METHODS:
+        return jsonify(flow_status())   # já é o método escolhido: nada a mudar
+    err = method_refusal(m)
+    if err:
+        return jsonify(error=err[1], flow=flow_status()), err[0]
+    cfg = copy.deepcopy(load_cfg())
+    cfg["flow_method"] = m
+    save_cfg(cfg)
+    set_requested(m)
+    sio.emit("config", public_cfg(cfg))
+    return jsonify(flow_status())
 
 
 @app.post("/api/reset-count")
@@ -1037,17 +1088,34 @@ def reset_count():
     return jsonify(ok=True)
 
 
+def single_instance():
+    """Trava de instância única por pasta de dados. No Windows o servidor web abre a porta com SO_REUSEADDR, e uma segunda
+    cópia sobe na MESMA porta sem erro: as duas consultavam o datalogger e gravavam o mesmo banco e o mesmo cursor
+    (visto em 27/10/2026). A trava é liberada pelo sistema quando o processo termina, mesmo se ele cair."""
+    f = open(os.path.join(DATA, "logs", "servidor.lock"), "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.error("Outra cópia do servidor já está rodando com esta pasta de dados (%s). Esta cópia vai encerrar; "
+                  "use a que já está aberta (http://127.0.0.1:%s) ou pare-a com parar.bat.", DATA, os.environ.get("PORT", 5000))
+        sys.exit(3)
+    return f
+
+
 if __name__ == "__main__":
-    _lock = single_instance(os.path.join(DATA, "servidor.lock"))
-    if _lock is None:
-        log.error("Já existe uma cópia do servidor em execução nesta pasta de dados (%s). Esta cópia vai encerrar.", DATA)
-        sys.exit(1)
+    _instance_lock = single_instance()
     host = os.environ.get("HOST", "127.0.0.1")
     if host not in ("127.0.0.1", "localhost") and not DASHBOARD_TOKEN:
         log.warning("Servidor exposto em %s SEM DASHBOARD_TOKEN: qualquer máquina da rede pode alterar configurações e iniciar ensaios.", host)
-    log.info("iniciando: datalogger=%s perfil=%s protocolo=%s proteção de escrita=%s método do medidor=%s", "configurado" if _comm.get("address") else "NÃO configurado",
-             _comm.get("profile"), _comm.get("protocol"), "ligada" if DASHBOARD_TOKEN else "desligada", load_cfg()["flow_method"])
-    for _k, _env in (("address", "DATALOGGER_HOST"), ("user", "DATALOGGER_USER"), ("protocol", "DATALOGGER_PROTOCOL"), ("profile", "CR1000X_PROFILE")):
-        log.info("parâmetro de conexão %s: origem %s", _k, "variável de ambiente " + _env if os.environ.get(_env) else "config.json")
+    log.info("iniciando: datalogger=%s (%s) perfil=%s (%s) protocolo=%s (%s) credenciais=%s método do medidor=%s proteção de escrita=%s",
+             "configurado" if _comm.get("address") else "NÃO configurado", _origin.get("address"), _comm.get("profile"), _origin.get("profile"),
+             _comm.get("protocol"), _origin.get("protocol"), CRED_SOURCE, METHOD_LABEL[FLOW["requested"]],
+             "ligada" if DASHBOARD_TOKEN else "desligada")
     sio.start_background_task(acquire)
     sio.run(app, host=host, port=int(os.environ.get("PORT", 5000)), allow_unsafe_werkzeug=True)

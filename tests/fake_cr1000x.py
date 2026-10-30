@@ -80,10 +80,7 @@ class H(BaseHTTPRequestHandler):
             sel = recs[-int(q.get("p1", 1)):]
         elif mode == "since-record":
             p1, p3 = int(q.get("p1", 0)), 500   # o servidor real decide o tamanho do bloco e avisa com "more"
-            sel = [r for r in recs if r[0] >= p1]
-            if not sel and recs and p1 > recs[-1][0]:   # 30/10: como a API real (e o emulador v3/v4), um registro que AINDA NAO existe responde do mais antigo
-                sel = list(recs)
-            sel = sel[:p3 + 1]
+            sel = [r for r in recs if r[0] >= p1][:p3 + 1]
             more, sel = len(sel) > p3, sel[:p3]  # pedido mais antigo que o disponível é "avançado" ao mais antigo (clamp)
         else:
             return self.send_error(400)

@@ -1,5 +1,5 @@
 """Cálculos de precipitação, intensidade, média móvel, vazão e gravimetria. Exemplos conferidos à mão."""
-import os, sys
+import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 import calc
@@ -159,3 +159,53 @@ def test_conversao_de_vazao(v, u, rho, exp):
 
 def test_vazao_massica_sem_densidade_e_none():
     assert calc.flow_to_l_min(1, "kg/h", None) is None and calc.flow_to_l_min(None, "L/min") is None
+
+
+# ---- otimização de 28/10/2026: a cobertura tem de sair igual à do algoritmo anterior (cópia de referência abaixo)
+def _covered_intervals_antes(sample_ts, start, end, max_gap_ms=calc.MAX_GAP_MS, nominal_ms=calc.NOMINAL_MS):
+    ts = [t for t in sample_ts if start <= t < end]
+    out = []
+    for i, t in enumerate(ts):
+        nxt = ts[i + 1] if i + 1 < len(ts) else None
+        w = (nxt - t) if nxt is not None and nxt - t <= max_gap_ms else nominal_ms
+        a, b = t, min(t + w, end)
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _horarios(rnd, n):
+    """Passo de 1 s com lacunas, limite de lacuna, horários repetidos e recuos (fora de ordem)."""
+    t, out = 0, []
+    for _ in range(n):
+        t += rnd.choice([1000, 1000, 1000, 2000, 2400, 2500, 2600, 7000, 0, -500])
+        out.append(t)
+    return out
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_trechos_cobertos_iguais_ao_algoritmo_anterior(seed):
+    rnd = random.Random(seed)
+    ts = _horarios(rnd, rnd.randint(0, 300))
+    if rnd.random() < 0.7:
+        ts.sort()
+    start = rnd.randint(-5000, 20000)
+    end = start + rnd.randint(0, 400_000)
+    assert calc.covered_intervals(ts, start, end) == _covered_intervals_antes(ts, start, end)
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_precipitacao_do_periodo_igual_a_composicao_anterior(seed):
+    rnd = random.Random(seed)
+    ts = sorted(_horarios(rnd, rnd.randint(0, 300)))
+    tips = sorted(rnd.randint(-2000, 400_000) for _ in range(rnd.randint(0, 40)))
+    start, end = 0, rnd.randint(1000, 400_000)
+    r = calc.precip_period(tips, ts, start, end, 0.2)
+    iv = _covered_intervals_antes(ts, start, end)
+    cov = sum(b - a for a, b in iv)
+    completo = (end - start) - cov <= max(3 * calc.NOMINAL_MS, 0.02 * (end - start))
+    assert (r["covered_s"], r["gaps"], r["complete"]) == (cov / 1000, max(0, len(iv) - 1), completo)
+    if cov > 0:
+        assert r["intensity_mm_h"] == sum(calc.count_in(tips, a, b) for a, b in iv) * 0.2 / (cov / 3.6e6)

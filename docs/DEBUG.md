@@ -25,7 +25,11 @@ Logs: `logs/servidor.log` (rotativo, 3 × 2 MB; `LOG_LEVEL=DEBUG` grava cada amo
 | `datalogger.py` `_match()` | log `Sem registro de <tabela> para <ts>`; `join_miss` | tabelas com horários diferentes (> 0,5 s) | `/api/diag` → `join_miss`; comparar horários das tabelas | ver `JOIN_TOL_MS`; conferir o `Scan` e `DataInterval` das tabelas |
 | `app.py` `link_view()` | aviso “relógio do datalogger difere do PC” | hora do datalogger errada | `/api/diag` → `link.clock_skew_s` | acertar a hora (períodos relativos dependem dela) |
 | perfil | medidor “aguardando integração” com o programa novo | perfil errado (`programa_atual`) | `Configurações` → Perfil; `link.flow_integrated` | `programa_vazao` e reiniciar |
-| `profiles/*.json` | “tabela reiniciada” no log | programa recarregado no datalogger | normal após reenviar o programa | — |
+| `datalogger.py` `_pull()` | “Tabela X reiniciada (programa reenviado?)” no log; `restarts` em `/api/diag` | programa reenviado (todas as tabelas juntas) | o último registro lido (âncora) sumiu ou mudou de horário | normal após reenviar o programa. Antes de 28/10/2026 o aviso aparecia sozinho para a `Balanca1s` (falso): ver `ENTREGA_2026-10-28.md` |
+| `app.py` `/api/flow/method` | “Pulso indisponível” / opção riscada no card | programa v3 no datalogger (sem `Flow_Pulsos`) | `/api/flow` → `has` | carregar `Pluviometria_v4_vazao_pulsos.CR1X` |
+| `app.py` `_confirm_method()` | “solicitado · aguardando” não sai | sem amostras novas do datalogger | `/api/diag` → `link.data_fresh` | restabelecer a comunicação; o método só vira ativo com dado |
+| `app.py` `crosscheck()` | aviso “a corrente indica vazão, mas nenhum pulso chegou em P2” | saída digital desligada, cabo, pull-up ou K | Diagnóstico no painel do medidor | ver `CRBASIC_V4_PULSOS.md` |
+| `app.py` `single_instance()` | “Outra cópia do servidor já está rodando” no log | servidor já aberto | `parar.bat` / Gerenciador de Tarefas | usar a cópia aberta |
 
 ## 3. Servidor ↔ interface
 

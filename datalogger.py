@@ -13,9 +13,11 @@ import logging
 import os
 import re
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -31,14 +33,16 @@ class Reading:
     tips: list = field(default_factory=list)  # basculadas novas: ts em ms, ou (ts, chave_unica) para nunca contar duas vezes
     mass_status: str = "ok"
     temp_status: str = "ok"
-    cor_ma: float | None = None  # sinal 4–20 mA do Medidor de Vazão, EXATAMENTE como o datalogger entrega (bruto, mesmo fora da faixa)
-    cor_status: str | None = "ok"  # canal analogico: ok (mA finito) | invalid (NAN) | no_comm | None = sem variavel no programa
-    flow_mode: str | None = None    # modo informado pelo datalogger: "pulse" | "analog" | None (so informativo; o metodo e do servidor)
-    flow_pulses: float | None = None  # pulsos brutos contados em P2 no ultimo Scan (Flow_Pulsos); None = invalido/indisponivel
-    flow_pulses_total: int | None = None  # contador acumulado do datalogger (Flow_PulsosTot); reinicia com o programa
-    flow_hz: float | None = None      # pulsos / intervalo do Scan (derivado; o dado primario e flow_pulses)
-    pulse_status: str | None = None   # canal de pulsos: ok | invalid | no_comm | None = sem variavel no programa
-    flow_channels: dict = field(default_factory=lambda: {"analog": False, "pulse": False})  # canais que o PROGRAMA em execucao fornece
+    cor_ma: float | None = None  # sinal 4–20 mA do Medidor de Vazão, exatamente como o datalogger entrega (sem conversão), MESMO fora da faixa
+    cor_status: str | None = "ok"  # perfil "flow": ok = havia registro do medidor | no_comm; None = sem variavel no programa. A classificacao (faixa, alarme) e do servidor
+    flow_mode: str | None = None    # modo informado pelo PROGRAMA (Flow_mode: 1 pulso, 2 analogico). Legado: o metodo do calculo e escolhido no servidor
+    flow_pulses: float | None = None  # pulsos brutos contados no Scan (contagem, NAO frequencia)
+    flow_hz: float | None = None      # so programas antigos que gravavam Hz; nos demais o servidor calcula pulsos / janela real
+    flow_pulses_total: int | None = None  # contador acumulado do datalogger (Flow_PulsosTot), quando o programa tem
+    flow_ma_code: int | None = None       # codigo bruto do canal analogico (Flow_Status)
+    flow_pulse_code: int | None = None    # codigo bruto do canal de pulsos (Flow_PStatus)
+    flow_dt_ms: int | None = None         # janela de contagem: intervalo ate o registro anterior da tabela do medidor
+    flow_has: tuple = ()                  # canais que o programa fornece: ("analog", "pulse")
     ts: int | None = None       # horário da medição em ms; None = agora (dados históricos recuperados trazem o próprio horário)
     sample: bool = True         # False = só carrega eventos (sem linha de medição)
 
@@ -58,8 +62,7 @@ class Datalogger:
         best = min((k for k in keys[max(0, i - 1):i + 1]), key=lambda k: abs(k - ts), default=None)
         if best is not None and abs(best - ts) <= JOIN_TOL_MS:
             return rows[best]
-        if table not in self._nojoin:   # tabela esparsa (so tem registro quando ha evento): ausencia nao e erro nem vai para o log
-            self._miss(table, ts, best)
+        self._miss(table, ts, best)
         return None
 
     def _miss(self, table, ts, near):
@@ -90,6 +93,11 @@ def _num(v):
     return x if math.isfinite(x) else None   # "NAN"/"INF" chegam como texto; nenhum dos dois é medida
 
 
+def _int(v):
+    x = _num(v)
+    return None if x is None else int(x)
+
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -107,24 +115,12 @@ def load_profile(name):
         raise ValueError(f"Perfil do datalogger nao encontrado: {path}")
 
 
-def _anchor(v):
-    """Cursor em disco -> ancora {no, time}. Formato antigo (inteiro = PROXIMO registro a pedir) vira ancora no-1 sem horario."""
-    if isinstance(v, dict) and "no" in v:
-        return {"no": int(v["no"]), "time": v.get("time")}
-    if isinstance(v, (int, float)) and v >= 1:
-        return {"no": int(v) - 1, "time": None}
-    return None
-
-
 class CR1000X(Datalogger):
     """Le as tabelas do CR1000X pela API web (DataQuery, mode=since-record), sempre pelo numero do registro.
 
-    Cursor por REGISTRO-ANCORA: guarda o ultimo registro recebido (numero + horario) e pede a partir DELE, nunca de um registro que
-    ainda nao existe (a API responde a um numero inexistente a partir do registro mais antigo, o que fazia o servidor reler e
-    regravar horas de historico). A ancora e descartada da resposta; so se ela sumiu ou mudou de horario e que houve reinicio
-    ou lacuna de verdade.
     Quais tabelas/campos usar vem do perfil (profiles/*.json; padrao: programa_atual, ou a variavel CR1000X_PROFILE).
-    Senha: variavel de ambiente DATALOGGER_PASSWORD. Use conta SOMENTE LEITURA. Prefira HTTPS.
+    Se a rede cair, o datalogger continua gravando e na volta recuperamos tudo a partir do ultimo registro confirmado
+    (cursor guardado em disco). Senha: variavel de ambiente DATALOGGER_PASSWORD. Use conta SOMENTE LEITURA. Prefira HTTPS.
     """
     buffered = True
 
@@ -140,22 +136,30 @@ class CR1000X(Datalogger):
                 self.ctx.check_hostname, self.ctx.verify_mode = False, ssl.CERT_NONE
         self.profile = load_profile(profile or os.environ.get("CR1000X_PROFILE") or "programa_atual")
         self.has_flow = bool(self.profile.get("cor") or self.profile.get("flow"))  # sem variavel de vazao no programa: o Medidor de Vazao fica 'aguardando integracao'
-        self.scan_ms = int(self.profile.get("scan_ms") or 1000)   # intervalo do Scan do CRBasic: resolucao temporal real dos registros
-        log.info("perfil %s carregado (medidor de vazao no programa: %s; Scan de %d ms)", self.profile.get("nome"), "sim" if self.has_flow else "nao", self.scan_ms)
+        # canais do medidor que o PROGRAMA carregado fornece (lidos do cabecalho da tabela; perfil "cor" antigo = so 4-20 mA)
+        self.flow_has = ("analog",) if self.profile.get("cor") else ()
         # Texto bruto da balanca (so perfis sem campo numerico): BAL_REGEX tem UM grupo que captura o numero.
         self.regex = re.compile(os.environ["BAL_REGEX"]) if os.environ.get("BAL_REGEX") else None
         self.factor = float(os.environ.get("BAL_FACTOR", "1"))
         self.cursor_file = cursor_file or os.path.join(os.environ.get("ELUS_DATA_DIR") or BASE, "cursor_cr1000x.json")
         try:
             with open(self.cursor_file, encoding="utf-8") as f:
-                raw = json.load(f)
+                saved = json.load(f)
         except (OSError, ValueError):
-            raw = {}
-        self.next = {t: a for t, v in raw.items() if (a := _anchor(v)) is not None}   # tabela -> ancora {no, time}
-        self.pending, self.seen = {}, {}   # seen = horario do ultimo registro ja entregue de cada tabela
-        self.fields = {}                   # tabela -> nomes dos campos vistos na ultima resposta (quais canais o programa fornece)
+            saved = {}
+        self.next = {k: v for k, v in saved.items() if not k.startswith("_")}
+        self.anchor_time = dict(saved.get("_anchor_time") or {})   # horario do ultimo registro entregue de cada tabela (prova de continuidade)
+        self.pending, self.pending_time, self.seen = {}, {}, {}    # seen = horario (ms) do ultimo registro ja entregue de cada tabela
+        self.fields = {}                   # tabela -> nomes dos campos do programa carregado (cabecalho da ultima resposta)
         self._nojoin = {self.profile['tips']['table']} if self.profile['tips'].get('sparse') else set()   # tabelas esparsas (so tem registro quando ha evento): ausencia nao e erro
         self.join_miss = {}                # tabela -> amostras sem registro correspondente (diagnostico de horario)
+        # Leitura das tabelas em paralelo: o mesmo numero de consultas por ciclo, em menos tempo SE o datalogger atender
+        # requisicoes simultaneas. Desligada por padrao; ligar com DATALOGGER_PARALLEL=1 e comparar "consulta p50" no log.
+        self.parallel = os.environ.get("DATALOGGER_PARALLEL", "0") == "1"
+        self._pool = None
+        self._lock = threading.Lock()      # contadores de diagnostico (lacunas, reinicios) compartilhados entre as tabelas
+        if self.parallel:
+            log.info("Leitura das tabelas do datalogger em paralelo (DATALOGGER_PARALLEL=1)")
 
     def _get(self, table, mode, p1=None):
         """Uma consulta DataQuery. Devolve (registros, more): `more` = o servidor ainda tem registros a entregar."""
@@ -166,36 +170,73 @@ class CR1000X(Datalogger):
         with urllib.request.urlopen(req, timeout=self.timeout, context=self.ctx) as r:
             d = json.load(r)
         names = [f["name"] for f in d["head"]["fields"]]
-        self.fields[table] = names
+        self.fields[table] = tuple(names)
         return [(rec["no"], rec["time"], dict(zip(names, rec["vals"]))) for rec in d["data"]], bool(d.get("more"))
 
     def _pull(self, table):
-        """Registros NOVOS da tabela desde a ancora (ultimo registro ja recebido). Nunca pede um registro inexistente."""
-        anc = _anchor(self.next.get(table))
-        out, p1, first_page = [], (0 if anc is None else anc["no"]), True
+        """Registros novos da tabela, pelo numero do registro.
+
+        Pede SEMPRE a partir do ultimo registro ja entregue (ancora) e o descarta. Assim nunca se pede um registro que o
+        datalogger ainda nao gravou: nesse caso a API responde a partir do registro MAIS ANTIGO da tabela, o que antes era
+        confundido com "tabela reiniciada" (relia a tabela inteira e regravava o historico com juncoes vazias).
+          1o registro = ancora (mesmo no e mesmo horario) -> continuidade comprovada; descarta a ancora
+          1o registro < ancora                            -> tabela recriada (programa reenviado): os registros ja sao da nova
+          1o registro = ancora, mas com outro horario     -> tabela recriada que ja passou do no antigo: rele desde o inicio
+          1o registro > ancora                            -> a ancora foi sobrescrita na memoria circular: lacuna (dados perdidos)
+        """
+        out, nxt = [], self.next.get(table)
+        anchor = nxt - 1 if nxt else None
         for _ in range(self.max_pages):
-            recs, more = self._get(table, "since-record", p1=p1)
-            if not recs:
-                break
-            if first_page and anc is not None:
-                no0, t0 = recs[0][0], recs[0][1]
-                if no0 == anc["no"] and (anc["time"] is None or t0 == anc["time"]):
-                    recs = recs[1:]                       # a ancora veio de volta: descarta; o resto e novo
-                elif no0 <= anc["no"]:                    # numeracao voltou (ou mesmo numero com outro horario): tabela recriada
-                    self.restarts += 1
-                    log.warning("Tabela %s reiniciada: ancora %s/%s, veio %s/%s; recomecando sem perder o historico", table, anc["no"], anc["time"], no0, t0)
-                    self.seen.pop(table, None)
-                else:                                     # a ancora saiu do anel: registros perdidos na memoria do datalogger
-                    self.gaps += 1
-                    log.warning("Lacuna em %s: ancora %s ja nao existe; o mais antigo disponivel e %s", table, anc["no"], no0)
-            first_page = False
+            recs, more = self._get(table, "since-record", p1=anchor if anchor is not None else (nxt or 0))
+            if anchor is not None:
+                known = self.anchor_time.get(table)
+                if not recs:   # a ancora nao existe e nada veio: tabela recriada (com menos registros que o cursor) ou vazia
+                    last, _ = self._get(table, "most-recent", p1=1)
+                    self._restart(table, anchor, last[0][0] if last else None)
+                    nxt = anchor = None
+                    if last:
+                        continue   # rele desde o primeiro registro nesta mesma consulta
+                    break
+                no, tm = recs[0][0], recs[0][1]
+                if no == anchor and known not in (None, tm):
+                    self._restart(table, anchor, f"{no} com outro horario ({tm} em vez de {known})")
+                    nxt = anchor = None
+                    continue
+                if no < anchor:
+                    self._restart(table, anchor, no)
+                    nxt = None
+                elif no > anchor:
+                    with self._lock:
+                        self.gaps += 1
+                    log.warning("Lacuna em %s: o ultimo registro lido (%s) nao existe mais no datalogger; o mais antigo disponivel e %s",
+                                table, anchor, no)
+                else:
+                    recs = recs[1:]
+                anchor = None
             out += recs
-            if not more or not recs:  # CsiJSON: o servidor pode dividir a resposta e avisa com "more"
+            if recs:
+                nxt = recs[-1][0] + 1
+            if not more:  # CsiJSON: o servidor pode dividir a resposta e avisa com "more"
                 break
-            p1 = recs[-1][0] + 1       # proxima pagina: so quando o servidor garante que ela existe (more)
-        if out:
-            self.pending[table] = {"no": out[-1][0], "time": out[-1][1]}
+        self.pending[table] = nxt
         return out
+
+    def _pull_all(self, tables):
+        """Registros novos de todas as tabelas do ciclo: uma depois da outra (padrao) ou ao mesmo tempo (DATALOGGER_PARALLEL=1).
+        Cada tabela tem cursor e ancora proprios; erro em qualquer uma derruba o ciclo inteiro, como na leitura sequencial."""
+        if not self.parallel or len(tables) < 2:
+            return {t: self._pull(t) for t in tables}
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=len(tables), thread_name_prefix="datalogger")
+        return dict(zip(tables, self._pool.map(self._pull, tables)))
+
+    def _restart(self, table, anchor, got):
+        with self._lock:
+            self.restarts += 1
+        log.warning("Tabela %s reiniciada (programa reenviado?): o ultimo registro lido era %s e o datalogger devolveu %s; "
+                    "recomecando do primeiro registro", table, anchor, got)
+        self.seen.pop(table, None)
+        self.anchor_time.pop(table, None)
 
     # ---- interpretacao de cada grandeza, conforme o perfil ----
     def _mass(self, spec, v):
@@ -221,60 +262,45 @@ class CR1000X(Datalogger):
             return None, ("no_comm" if (nbytes == 0 or not raw) else "invalid")
         return val, "ok"
 
-    def _flow(self, fl, fv):
-        """Medidor de vazao (tabela Vazao1s): os canais que o programa fornece, com o dado BRUTO de cada um.
-
-        analogico: cor_ma = Flow_mA como veio (mesmo fora de 4-20 mA: quem classifica e o servidor); NAN => invalid.
-        pulsos   : flow_pulses = Flow_Pulsos (contagem bruta do Scan), flow_pulses_total = Flow_PulsosTot; Flow_PStatus <> 0 => invalid.
-        Campo ausente na tabela (programa v3) => canal indisponivel (status None), nao falha."""
-        names = self.fields.get(fl["table"]) or []
-        ch = {"analog": fl.get("ma") in names, "pulse": bool(fl.get("pulses")) and fl["pulses"] in names}
-        out = {"flow_mode": None, "cor_ma": None, "cor_status": None, "flow_pulses": None, "flow_pulses_total": None, "flow_hz": None,
-               "pulse_status": None, "flow_channels": ch}
-        if fv is None:
-            out["cor_status"] = "no_comm" if ch["analog"] else None
-            out["pulse_status"] = "no_comm" if ch["pulse"] else None
-            return out
-        out["flow_mode"] = {1: "pulse", 2: "analog"}.get(int(_num(fv.get(fl["mode"])) or 0)) if fl.get("mode") else None
-        if ch["analog"]:
-            ma = _num(fv.get(fl["ma"]))
-            code = _num(fv.get(fl["status"])) if fl.get("status") else 0
-            if ma is None or code is None or int(code) == 3:   # 3 = sem leitura (NAN) no programa v4
-                out["cor_status"] = "invalid"
-            else:
-                out["cor_ma"], out["cor_status"] = ma, "ok"
-        if ch["pulse"]:
-            n = _num(fv.get(fl["pulses"]))
-            ps = _num(fv.get(fl["pstatus"])) if fl.get("pstatus") else 0
-            tot = _num(fv.get(fl["pulses_total"])) if fl.get("pulses_total") else None
-            out["flow_pulses_total"] = int(tot) if tot is not None else None
-            if n is None or ps is None or int(ps) != 0:
-                out["pulse_status"] = "invalid"
-            else:
-                out["flow_pulses"], out["pulse_status"] = n, "ok"
-                out["flow_hz"] = n / (self.scan_ms / 1000.0)
-        return out
-
     def _reading(self, ts, rows):
         P = self.profile
         mass, ms = self._mass(P["mass"], rows.get(P["mass"]["table"]))
         tv = rows.get(P["temp"]["table"])
         temp = _num(tv.get(P["temp"]["value"])) if tv else None
         ts_ = "ok" if temp is not None else ("invalid" if tv else "no_comm")
-        extra = {"cor_status": None}   # sem variavel de vazao no programa: nao e falha, e "aguardando integracao"
-        if P.get("cor"):   # perfis antigos (elus_calib): so o sinal em mA, sem tabela de vazao propria
-            cs, ma = "no_comm", None
+        ma, cs = None, None   # None = o programa nao tem variavel de vazao: nao e falha, e "aguardando integracao"
+        if P.get("cor"):
+            cs = "no_comm"
             cv = rows.get(P["cor"]["table"])
             if cv:
                 ma = _num(cv.get(P["cor"]["ma"]))
                 bad = "status" in P["cor"] and int(_num(cv.get(P["cor"]["status"])) or 0) in P["cor"].get("status_bad", [])
-                cs = "ok" if ma is not None and not bad else ("invalid" if ma is None and cv else "no_comm")
+                cs = "ok" if ma is not None and not bad else "no_comm"
                 ma = ma if cs == "ok" else None
-            extra = {"cor_ma": ma, "cor_status": cs, "flow_channels": {"analog": True, "pulse": False}}
+        mode = pulses = hz = ptot = mcode = pcode = dt = None
+        has = self.flow_has
         fl = P.get("flow")
-        if fl:
-            extra = self._flow(fl, rows.get(fl["table"]))
-        return Reading(mass_g=mass, temp_c=temp, mass_status=ms, temp_status=ts_, ts=ts, **extra)
+        if fl:   # medidor de vazao: canal 4-20 mA e, se o programa tiver, canal de pulsos, tudo da MESMA tabela e SEM classificar aqui
+            names = self.fields.get(fl["table"]) or ()
+            has = self.flow_has = tuple(c for c, key in (("analog", "ma"), ("pulse", "pulses")) if fl.get(key) and fl[key] in names)
+            fv = rows.get(fl["table"])
+            if fv is None:
+                cs = "no_comm"
+            else:
+                cs = "ok"   # o registro chegou; faixa, alarme e validade de cada canal sao decididos no servidor (calc.flow_reading)
+                ma = _num(fv.get(fl["ma"])) if "analog" in has else None
+                mcode = _int(fv.get(fl.get("status", "")))
+                mode = {1: "pulse", 2: "analog"}.get(_int(fv.get(fl.get("mode", ""))))
+                if "pulse" in has:
+                    pulses = _num(fv.get(fl["pulses"]))
+                    ptot = _int(fv.get(fl.get("pulses_total", "")))
+                    pcode = _int(fv.get(fl.get("pulse_status", "")))
+                if fl.get("freq") and fl["freq"] in names:   # programas antigos que gravavam a frequencia pronta
+                    hz = _num(fv.get(fl["freq"]))
+                dt = fv.get("__dt_ms")
+        return Reading(mass_g=mass, temp_c=temp, mass_status=ms, temp_status=ts_, cor_ma=ma, cor_status=cs, ts=ts,
+                       flow_mode=mode, flow_pulses=pulses, flow_hz=hz, flow_pulses_total=ptot, flow_ma_code=mcode,
+                       flow_pulse_code=pcode, flow_dt_ms=dt, flow_has=has)
 
     def read(self):
         P = self.profile
@@ -282,22 +308,31 @@ class CR1000X(Datalogger):
         if not P["tips"].get("sparse"):
             dense.add(P["tips"]["table"])
         tables = sorted(dense | {P["tips"]["table"]})  # tabela "sparse" = de eventos: so tem registro quando ha basculada
-        pulled = {t: self._pull(t) for t in tables}
+        pulled = self._pull_all(tables)
         # As tabelas sao gravadas uma depois da outra. So entregamos ate o instante em que TODAS ja chegaram
         # (marca d'agua); o resto fica no datalogger e e lido de novo na proxima rodada, sem avancar o cursor.
         marks = [_ts_ms(pulled[t][-1][1]) if pulled[t] else self.seen.get(t) for t in sorted(dense)]
         if any(m is None for m in marks):
-            self.pending = {}
+            self.pending, self.pending_time = {}, {}
             return []
         wm = max(min(marks) + JOIN_TOL_MS, max(marks) - 5000)   # tolerância do casamento; e uma tabela parada há > 5 s não segura as outras (vira "sem comunicação")
+        ft = P["flow"]["table"] if P.get("flow") else None
         for t in tables:
             keep = [r for r in pulled[t] if t not in dense or _ts_ms(r[1]) <= wm]  # evento esparso: entrega tudo que ja chegou
             pulled[t] = keep
+            if t == ft:   # janela de contagem de cada registro do medidor = intervalo real ate o registro anterior da tabela
+                prev = self.seen.get(t)
+                for _, tm, v in keep:
+                    cur = _ts_ms(tm)
+                    v["__dt_ms"] = None if prev is None else cur - prev
+                    prev = cur
             if keep:
-                self.pending[t] = {"no": keep[-1][0], "time": keep[-1][1]}
+                self.pending[t] = keep[-1][0] + 1
+                self.pending_time[t] = keep[-1][1]
                 self.seen[t] = _ts_ms(keep[-1][1])
             elif pulled_any(t, self.pending):
                 self.pending.pop(t, None)
+                self.pending_time.pop(t, None)
         by_ts = {t: {_ts_ms(tm): v for _, tm, v in recs} for t, recs in pulled.items()}
         keys = {t: sorted(d) for t, d in by_ts.items()}
         readings = []
@@ -313,14 +348,6 @@ class CR1000X(Datalogger):
                 readings = [Reading(sample=False)]
             readings[0].tips = ev   # entram antes de qualquer amostra do lote: o total por amostra já as conta
         return readings
-
-    def channels(self):
-        """Canais do medidor que o programa em execucao fornece, pelos campos vistos na ultima resposta da tabela de vazao."""
-        fl = self.profile.get("flow")
-        if not fl:
-            return {"analog": bool(self.profile.get("cor")), "pulse": False}
-        names = self.fields.get(fl["table"]) or []
-        return {"analog": fl.get("ma") in names, "pulse": bool(fl.get("pulses")) and fl["pulses"] in names}
 
     def health(self):
         """Diagnostico SO LEITURA, fora do ciclo de aquisicao: desvio do relogio (ClockCheck) e scans perdidos (tabela Status).
@@ -349,10 +376,11 @@ class CR1000X(Datalogger):
     def ack(self):
         if self.pending:
             self.next.update(self.pending)
-            self.pending = {}
+            self.anchor_time.update(self.pending_time)
+            self.pending, self.pending_time = {}, {}
             tmp = self.cursor_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.next, f)
+                json.dump({**self.next, "_anchor_time": self.anchor_time}, f)
                 f.flush()
                 os.fsync(f.fileno())   # queda de energia não deixa o cursor vazio (senão a volta relê tudo desde o registro 0)
             for i in range(3):   # Windows: antivirus/OneDrive/indexador seguram o arquivo por ms; tenta de novo antes de desistir

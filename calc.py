@@ -4,6 +4,7 @@ Convenções:
   * tempos em ms (época); intervalos semiabertos [início, fim): um evento exatamente em `fim` pertence ao período seguinte.
   * None = indisponível. Ausência de dado NUNCA vira zero.
   * massa em g, volume em cm³/mL/L, precipitação em mm, intensidade em mm/h, vazão em L/min.
+  * medidor de vazão: fator K interno em pulsos/L; frequência = pulsos ÷ janela real de contagem (nunca a contagem crua).
 """
 from __future__ import annotations
 
@@ -44,20 +45,36 @@ def covered_intervals(sample_ts, start, end, max_gap_ms=MAX_GAP_MS, nominal_ms=N
     """
     ts = [t for t in sample_ts if start <= t < end]
     out = []
+    if not ts:
+        return out
+    a = b = None   # trecho aberto [a, b): só vira tupla quando fecha (antes, cada amostra recriava a tupla; mesmo resultado)
+    last = len(ts) - 1
     for i, t in enumerate(ts):
-        nxt = ts[i + 1] if i + 1 < len(ts) else None
-        w = (nxt - t) if nxt is not None and nxt - t <= max_gap_ms else nominal_ms
-        a, b = t, min(t + w, end)
-        if out and a <= out[-1][1]:
-            out[-1] = (out[-1][0], max(out[-1][1], b))
+        w = nominal_ms
+        if i < last:
+            d = ts[i + 1] - t
+            if d <= max_gap_ms:
+                w = d
+        e = t + w
+        if e > end:
+            e = end
+        if a is not None and t <= b:
+            if e > b:
+                b = e
         else:
-            out.append((a, b))
+            if a is not None:
+                out.append((a, b))
+            a, b = t, e
+    out.append((a, b))
     return out
 
 
 def window_coverage(sample_ts, start, end, **kw):
     """(ms cobertos, nº de lacunas, completo?). Completo = descoberto ≤ max(3 períodos nominais (inclui a latência de ~1–2 s do dado mais recente), 2 % da janela)."""
-    iv = covered_intervals(sample_ts, start, end, **kw)
+    return _coverage(covered_intervals(sample_ts, start, end, **kw), start, end)
+
+
+def _coverage(iv, start, end):
     cov = sum(b - a for a, b in iv)
     gaps = max(0, len(iv) - 1)
     tol = max(3 * NOMINAL_MS, 0.02 * (end - start))
@@ -72,13 +89,14 @@ def precip_period(tip_ts, sample_ts, start, end, res_mm):
     `complete` False => resultado parcial (mostre a duração coberta). Sem amostras => intensidade None.
     """
     n = count_in(tip_ts, start, end)
-    cov, gaps, complete = window_coverage(sample_ts, start, end)
+    iv = covered_intervals(sample_ts, start, end)   # uma vez só: a cobertura e as basculadas cobertas usam os mesmos trechos
+    cov, gaps, complete = _coverage(iv, start, end)
     out = {"tips": n, "covered_s": cov / 1000, "window_s": (end - start) / 1000, "gaps": gaps, "complete": complete,
            "precip_mm": None, "intensity_mm_h": None}
     if res_mm is None:
         return out
     if cov > 0:
-        n_cov = sum(count_in(tip_ts, a, b) for a, b in covered_intervals(sample_ts, start, end))
+        n_cov = sum(count_in(tip_ts, a, b) for a, b in iv)
         out["precip_mm"] = n * res_mm
         out["intensity_mm_h"] = n_cov * res_mm / (cov / 3.6e6)
     elif n > 0:
@@ -161,7 +179,7 @@ def gravimetric(m0_g, m1_g, t0_ms, t1_ms, density_g_cm3, area_cm2, pulses=None, 
     dm = m1_g - m0_g
     r["delta_mass_g"] = dm
     if dm < 0:
-        r["issues"].append("a massa diminuiu no intervalo (balança esvaziada ou tarada?): referência indisponível")
+        r["issues"].append("a massa diminuiu durante o ensaio (balança esvaziada ou tarada?): referência indisponível")
         return r
     if not density_g_cm3 or density_g_cm3 <= 0:
         r["issues"].append("densidade da água não configurada: volume indisponível")
@@ -181,96 +199,130 @@ def gravimetric(m0_g, m1_g, t0_ms, t1_ms, density_g_cm3, area_cm2, pulses=None, 
     return r
 
 
-# ---------------------------------------------------------------- medidor de vazão: fator K, sinal 4–20 mA e pulsos brutos
-MA_TOL = 0.02         # tolerância (mA) nos limites de 4 e 20 mA: dentro dela o valor fica PRESO ao limite, nunca extrapolado
-MA_FAIL_BELOW = 3.6   # abaixo disso o sinal é falha do transmissor/laço (NAMUR NE 43), não vazão
-K_UNITS = ("pulsos/L", "pulsos/m³", "L/pulso", "mL/pulso")
+# ---------------------------------------------------------------- medidor de vazão: fator K
+# Unidade interna do fator K: pulsos por litro. "Volume por pulso" é como o MAG 5000 configura a saída de pulsos.
+#   pulsos/L  -> K                 pulsos/m³ -> K / 1000
+#   L/pulso   -> 1 / V             mL/pulso  -> 1000 / V
+K_UNITS = {"pulsos/L": ("k", 1.0), "pulsos/m³": ("k", 1e-3), "L/pulso": ("v", 1.0), "mL/pulso": ("v", 1e-3)}
 
 
-def k_to_pulses_per_l(value, unit):
-    """Fator K em qualquer unidade aceita -> pulsos por litro. None se ausente, não finito, <= 0 ou unidade desconhecida."""
+def k_to_pulses_per_l(value, unit="pulsos/L"):
+    """Fator K como o operador digitou -> pulsos/L. None se ausente, não finito, ≤ 0 ou unidade desconhecida (nunca um K presumido)."""
+    if value is None or unit not in K_UNITS:
+        return None
     try:
         v = float(value)
     except (TypeError, ValueError):
         return None
     if not math.isfinite(v) or v <= 0:
         return None
-    if unit == "pulsos/L":
-        return v
-    if unit == "pulsos/m³":
-        return v / 1000.0
-    if unit == "L/pulso":
-        return 1.0 / v
-    if unit == "mL/pulso":
-        return 1000.0 / v
-    return None
+    kind, f = K_UNITS[unit]
+    return v * f if kind == "k" else 1.0 / (v * f)
 
 
-def classify_ma(ma, tol=MA_TOL, fail_below=MA_FAIL_BELOW):
-    """(estado, valor usável) do sinal 4–20 mA.
+def k_from_pulses_per_l(k_l, unit="pulsos/L"):
+    """Inverso de k_to_pulses_per_l: pulsos/L -> valor na unidade de exibição."""
+    if not k_l or k_l <= 0 or unit not in K_UNITS:
+        return None
+    kind, f = K_UNITS[unit]
+    return k_l / f if kind == "k" else 1.0 / (k_l * f)
 
-    ok    : 4−tol <= mA <= 20+tol; o valor devolvido fica preso a [4, 20] (sem extrapolar a escala)
-    under : fail_below <= mA < 4−tol      over: mA > 20+tol      fail: mA < fail_below      none: sem sinal
+
+# ---------------------------------------------------------------- medidor de vazão: sinal 4–20 mA
+MA_FAULT = 3.6     # NAMUR NE 43: abaixo disso é sinal de falha (no modo "4–20 mA + alarme" o MAG 5000 vai a 1,3 / 2 / 3 mA)
+MA_TOL = 0.02      # mA: tolerância padrão nos limites 4 e 20 mA (0,125 % do span); configurável
+
+
+def classify_ma(ma, tol=MA_TOL):
+    """Sinal 4–20 mA -> (estado, mA usado na escala).
+
+      ok     4 ≤ I ≤ 20                   escala linear
+      low    4 − tol ≤ I < 4              escala presa em 4 mA (ruído em vazão zero; não extrapola)
+      high   20 < I ≤ 20 + tol            escala presa em 20 mA
+      under  3,6 ≤ I < 4 − tol            abaixo da faixa: sem vazão
+      over   I > 20 + tol                 acima da faixa (vazão acima do Qmax ou saída saturada): sem vazão
+      fault  I < 3,6                      falha: laço aberto (~0 mA) ou alarme do transmissor
+      invalid  sem leitura (NAN)
     """
-    if ma is None or not math.isfinite(ma):
-        return "none", None
-    if ma < fail_below:
-        return "fail", ma
+    if ma is None:
+        return "invalid", None
+    tol = max(0.0, float(tol or 0.0))
+    if ma < MA_FAULT:
+        return "fault", None
     if ma < 4.0 - tol:
-        return "under", ma
-    if ma > 20.0 + tol:
-        return "over", ma
-    return "ok", min(20.0, max(4.0, ma))
+        return "under", None
+    if ma < 4.0:
+        return "low", 4.0
+    if ma <= 20.0:
+        return "ok", ma
+    if ma <= 20.0 + tol:
+        return "high", 20.0
+    return "over", None
 
 
-def pulse_volume_l(n, k_pulses_per_l):
-    """Volume (L) de N pulsos brutos: V = N / K. None sem N ou sem K válido."""
-    if n is None or not k_pulses_per_l or k_pulses_per_l <= 0:
+def analog_flow_l_min(ma_eff, q4, q20, range_unit, density_g_cm3=None):
+    """mA já classificado (4..20) -> L/min pela relação linear da faixa configurada. Faixa ausente => None."""
+    if ma_eff is None or q4 is None or q20 is None:
         return None
-    return n / k_pulses_per_l
+    return flow_to_l_min(q4 + (ma_eff - 4.0) / 16.0 * (q20 - q4), range_unit, density_g_cm3)
 
 
-def pulse_flow_l_min(n, dt_s, k_pulses_per_l):
-    """Vazão média (L/min) de N pulsos em dt_s segundos: Q = (N / K) / dt · 60. None se dt <= 0, sem N ou sem K."""
-    v = pulse_volume_l(n, k_pulses_per_l)
-    if v is None or dt_s is None or dt_s <= 0:
-        return None
-    return v / dt_s * 60.0
+# ---------------------------------------------------------------- medidor de vazão: pulsos
+# Flow_PStatus do CRBasic v4. 0 = contagem válida.
+PULSE_CODES = {1: "primeiro Scan depois de iniciar o programa (janela de contagem incompleta)",
+               2: "contador de pulsos saturado",
+               3: "frequência acima do máximo possível do medidor (ruído ou ligação)",
+               4: "contagem sem leitura (NAN)"}
 
 
-def pulse_count_window(counts, totals):
-    """Pulsos recebidos numa janela de registros do datalogger.
+def pulse_window_s(dt_ms):
+    """Janela de contagem de um registro (s) e se ela foi presumida.
 
-    counts: pulsos contados em cada registro (Flow_Pulsos); totals: contador acumulado no fim de cada registro (Flow_PulsosTot).
-    n_delta = Tot_final − (Tot_inicial − pulsos_inicial)  (= Contador_final − Contador_inicial do pedido): robusto a registros perdidos.
-    n_sum   = Σ counts: robusto a reinício do contador, perde o que caiu em lacunas.
-    n = n_delta quando o acumulado existe e nunca diminuiu ("acumulado"); senão n_sum ("soma"). reset = o acumulado diminuiu.
+    A contagem de um registro cobre o intervalo REAL desde o registro anterior da mesma tabela (1 s nominal; 2 s se um Scan
+    foi pulado, porque o contador de hardware acumula). Sem registro anterior, ou com lacuna maior que MAX_GAP_MS (registros
+    perdidos, não Scan pulado), usa o Scan nominal e marca como presumida.
     """
-    out = {"n_sum": None, "n_delta": None, "n": None, "method": None, "reset": False}
-    cs = [c for c in counts if c is not None]
-    if not cs:
-        return out
-    out["n_sum"] = int(round(sum(cs)))
-    ts = [t for t in totals if t is not None]
-    if len(ts) == len(counts) and ts:
-        if any(b < a for a, b in zip(ts, ts[1:])):
-            out["reset"] = True
-        else:
-            out["n_delta"] = int(round(ts[-1] - (ts[0] - counts[0])))
-    if out["n_delta"] is not None and not out["reset"]:
-        out["n"], out["method"] = out["n_delta"], "acumulado"
+    if dt_ms is not None and 0 < dt_ms <= MAX_GAP_MS:
+        return dt_ms / 1000.0, False
+    return NOMINAL_MS / 1000.0, True
+
+
+def pulse_resolution_l_min(k_pulses_per_l, window_s=1.0):
+    """Degrau de vazão de 1 pulso numa janela (L/min): a resolução da leitura instantânea por pulsos."""
+    if not k_pulses_per_l or k_pulses_per_l <= 0 or not window_s:
+        return None
+    return 60.0 / (k_pulses_per_l * window_s)
+
+
+def pulses_between(ts, pulses, totals, valid, a, b):
+    """Pulsos em (a, b] para auditoria de volume.
+
+    Preferência: diferença do contador acumulado (Flow_PulsosTot) entre os registros em a e em b. Ela não perde pulsos de
+    registros ausentes no meio. Só vale se os dois extremos têm o acumulado e ele nunca diminui no trecho (diminuir =
+    programa reiniciado ou volta a zero). Senão: soma das contagens válidas por registro em (a, b].
+    Devolve (pulsos, 'acumulado' | 'soma', aviso ou None). Listas paralelas e ordenadas por ts.
+    """
+    idx = [i for i, t in enumerate(ts) if a < t <= b]
+    by_ts = {t: i for i, t in enumerate(ts)}
+    ia, ib = by_ts.get(a), by_ts.get(b)
+    if ia is not None and ib is not None and totals[ia] is not None and totals[ib] is not None:
+        seq = [totals[i] for i in [ia] + idx if totals[i] is not None]
+        if all(y >= x for x, y in zip(seq, seq[1:])):
+            return totals[ib] - totals[ia], "acumulado", None
+        aviso = "contador acumulado reiniciado no intervalo (programa do datalogger reiniciado?): volume pela soma das contagens"
     else:
-        out["n"], out["method"] = out["n_sum"], "soma"
-    return out
+        aviso = None if all(t is None for t in totals) else "contador acumulado ausente num extremo do intervalo: volume pela soma das contagens"
+    return sum(pulses[i] for i in idx if valid[i] and pulses[i] is not None), "soma", aviso
 
 
-# ---------------------------------------------------------------- medidor de vazão (qualquer modo -> L/min)
-def flow_from_sample(mode, status, pulses_hz, ma, k_pulses_per_l, q4, q20, range_unit, density_g_cm3=None, tol=MA_TOL):
+# ---------------------------------------------------------------- medidor de vazão: uma amostra, qualquer método -> L/min
+def flow_from_sample(mode, status, pulses_hz, ma, k_pulses_per_l, q4, q20, range_unit, density_g_cm3=None, ma_tol=0.0):
     """Vazão instantânea em L/min a partir do dado BRUTO de uma amostra, ou None se não for possível.
 
     pulso   : Q = f(Hz) / K(pulsos/L) · 60        (K vem da configuração; sem K => None, nunca um K presumido)
-    analógico: mA classificado por `classify_ma` (tolerância nos limites, sem extrapolar) -> faixa linear 4–20 mA
-               (q4..q20 na unidade `range_unit`) -> L/min; fora da faixa ou falha => None
+    analógico: mA -> faixa linear 4–20 mA (q4..q20 na unidade `range_unit`) -> L/min; fora de 4–20 mA (além da
+               tolerância `ma_tol`) => None. Dentro da tolerância a escala fica presa no limite (sem extrapolar).
+    `ma_tol` = 0 reproduz exatamente o critério antigo (ensaios congelados antes da tolerância existir).
     """
     if status != "ok":
         return None
@@ -278,10 +330,75 @@ def flow_from_sample(mode, status, pulses_hz, ma, k_pulses_per_l, q4, q20, range
         if pulses_hz is None or not k_pulses_per_l or k_pulses_per_l <= 0:
             return None
         return pulses_hz / k_pulses_per_l * 60.0
-    state, ma_c = classify_ma(ma, tol)
-    if state != "ok" or q4 is None or q20 is None:
-        return None
-    return flow_to_l_min(q4 + (ma_c - 4.0) / 16.0 * (q20 - q4), range_unit, density_g_cm3)
+    _, eff = classify_ma(ma, ma_tol)
+    return analog_flow_l_min(eff, q4, q20, range_unit, density_g_cm3)
+
+
+def flow_reading(method, has, comm, ma, pulses, pulse_code, dt_ms, cfg):
+    """Avalia UMA amostra do medidor pelo método escolhido. Nada é presumido: sem parâmetro => 'unconfigured'.
+
+    method: 'analog' | 'pulse'      has: canais que o programa do datalogger fornece ({'analog', 'pulse'})
+    comm  : 'ok' (havia registro de Vazao1s para a amostra) | 'no_comm'
+    cfg   : q4, q20, range_unit, density, k_pulses_per_l, ma_tol
+    Estados: ok | no_comm | unavailable | invalid | fault | out_of_range | unconfigured.
+    O sinal bruto (mA ou pulsos/Hz) volta sempre que existir, mesmo quando a vazão não pode ser calculada.
+    """
+    out = {"method": method, "state": None, "reason": None, "lmin": None, "clamp": None, "ma": ma, "ma_class": None,
+           "pulses": pulses, "hz": None, "window_s": None, "window_assumed": None, "resolution_lmin": None}
+    if method not in ("analog", "pulse"):
+        out.update(state="unconfigured", reason="método de aquisição não definido")
+        return out
+    if method not in has:
+        out.update(state="unavailable", reason="o programa do datalogger não fornece o canal de pulsos (P2)" if method == "pulse"
+                   else "o programa do datalogger não fornece o canal 4–20 mA")
+        return out
+    if comm != "ok":
+        out.update(state="no_comm", reason="sem registro do medidor para esta amostra")
+        return out
+    k = cfg.get("k_pulses_per_l")
+    if method == "pulse":
+        w, assumed = pulse_window_s(dt_ms)
+        out.update(window_s=w, window_assumed=assumed, resolution_lmin=pulse_resolution_l_min(k, w))
+        if pulse_code:
+            out.update(state="invalid", reason=PULSE_CODES.get(pulse_code, f"código de estado {pulse_code} do canal de pulsos"))
+            return out
+        if pulses is None:
+            out.update(state="invalid", reason="contagem de pulsos ausente")
+            return out
+        out["hz"] = pulses / w
+        if not k or k <= 0:
+            out.update(state="unconfigured", reason="fator K não configurado")
+            return out
+        out.update(state="ok", lmin=out["hz"] / k * 60.0)
+        return out
+    cls, eff = classify_ma(ma, cfg.get("ma_tol", MA_TOL))
+    out["ma_class"] = cls
+    if cls == "invalid":
+        out.update(state="invalid", reason="corrente sem leitura (NAN)")
+    elif cls == "fault":
+        out.update(state="fault", reason="corrente abaixo de 3,6 mA: laço aberto ou alarme do transmissor")
+    elif cls == "under":
+        out.update(state="out_of_range", reason="corrente abaixo de 4 mA além da tolerância")
+    elif cls == "over":
+        out.update(state="out_of_range", reason="corrente acima de 20 mA além da tolerância (vazão acima do Qmax ou saída saturada)")
+    elif cfg.get("q4") is None or cfg.get("q20") is None:
+        out.update(state="unconfigured", reason="faixa 4–20 mA não configurada")
+    else:
+        v = analog_flow_l_min(eff, cfg["q4"], cfg["q20"], cfg.get("range_unit", "L/min"), cfg.get("density"))
+        if v is None:
+            out.update(state="unconfigured", reason="unidade mássica da faixa exige a densidade da água")
+        else:
+            out.update(state="ok", lmin=v, clamp={"low": "low", "high": "high"}.get(cls))
+    return out
+
+
+def stored_status(reading):
+    """Estado gravado no banco (coluna cor_status) a partir de flow_reading: diz se o DADO é válido, não se a configuração
+    está completa. 'unconfigured' com sinal válido grava 'ok' (a vazão é recalculada quando a configuração existir)."""
+    st = reading["state"]
+    if st in ("ok", "unconfigured"):
+        return "ok"
+    return "out_of_range" if st == "fault" else st
 
 
 def sample_weights_ms(ts, max_gap_ms=MAX_GAP_MS, nominal_ms=NOMINAL_MS):

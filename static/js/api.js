@@ -21,15 +21,23 @@ const Api = {
       const v = window.prompt('Este servidor exige um token de acesso para alterar configurações ou controlar ensaios. Informe o token:');
       if (v) { Tok.set(v.trim()); return this.post(url, body, true); }
     }
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      const e = new Error(j.error || r.status);
+      e.data = j;
+      throw e;
+    }
     return r.json();
   },
-  connect(onSample, onConn, onTrial) {
+  // Eventos do servidor: sample (nova leitura), trial (estado do ensaio), flow (método do medidor), config (outra aba salvou)
+  connect(h) {
     const s = io();
-    s.on('sample', onSample);
-    s.on('trial', onTrial);
-    s.on('connect', () => onConn(true));
-    s.on('disconnect', () => onConn(false));
+    s.on('sample', h.sample);
+    s.on('trial', h.trial);
+    s.on('flow', h.flow);
+    s.on('config', h.config);
+    s.on('connect', () => h.conn(true));
+    s.on('disconnect', () => h.conn(false));
     return s;
   },
 };

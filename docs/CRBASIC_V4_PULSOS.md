@@ -1,48 +1,89 @@
-# CRBasic v4: `Pluviometria_v4_vazao_pulsos.CR1X` — o que muda, como carregar, como reverter
+# CRBasic v4: medidor de vazão com 4–20 mA **e** pulsos
 
-Programa **em uso** no CR1000Xe (segundo o relatório do TI de 28/10): `crbasic/Pluviometria_v3_com_vazao_4-20mA.CR1X`.
-Programa com pulsos: `crbasic/Pluviometria_v4_vazao_pulsos.CR1X` — **não compilado nem carregado** (não há CRBasic Editor nesta máquina).
-Proposta para resolução de 100 ms: `crbasic/propostas/Pluviometria_v5_scan100ms_PROPOSTA.CR1X` — **não compilada; não carregar sem teste** (`docs/TEMPORIZACAO_E_PULSOS.md`).
+Arquivo: `crbasic/Pluviometria_v4_vazao_pulsos.CR1X`. Base: `crbasic/Pluviometria_v3_com_vazao_4-20mA.CR1X` (o programa que está no
+datalogger hoje, agora guardado dentro do projeto). **Não foi compilado aqui** (não há CRBasic Editor nesta máquina): compile e leia os
+avisos antes de enviar.
 
-## Diferenças v3 → v4 (confirmadas por `diff`)
+## O que mudou em relação à v3
 
-| Onde | v3 (em uso) | v4 |
+| Trecho | Mudança | Por quê |
 |---|---|---|
-| Constantes | — | `ScanSeg = 1`, `Flow_PMaxHz = 12000` |
-| Variáveis | — | `Flow_Pulsos` (Float), `Flow_PulsosTot` (Long), `Flow_PStatus` (Long); `Flow_Primeira` (Dim) |
-| Tabela `Vazao1s` | `Flow_mV, Flow_mA, Flow_Status, Flow_mode` | os 4 iguais + `Flow_Pulsos, Flow_PulsosTot, Flow_PStatus` |
-| `BeginProg` | `Flow_Status = 3` | + `Flow_mode = 2`, `Flow_Pulsos = NAN`, `Flow_PulsosTot = 0`, `Flow_PStatus = 1`, `Flow_Primeira = True` |
-| 4–20 mA | `Flow_mA = NAN` saía com `Flow_Status = 0` | `If Flow_mA = NAN Then Flow_Status = 3` (sem leitura) |
-| Pulsos | — | `PulseCount(Flow_Pulsos,1,P2,3,0,1,0)` em todo Scan + classificação `Flow_PStatus` + acumulado |
-| Balança, termopar, pluviômetro | idênticos | idênticos |
+| Balança, termopar, pluviômetro | **nenhuma** (diff conferido linha a linha) | não mexer no que funciona |
+| `Flow_Status` | `If Flow_mA = NAN Then Flow_Status = 3` antes das comparações | na v3, `NAN < 4` e `NAN > 20` são falsos: uma leitura NAN saía com `Flow_Status = 0` |
+| Constantes | `Flow_PConfig = 3`, `ScanSeg = 1`, `Flow_PulsoMax_Hz = 12000`, `Flow_PulsoSat = 16777215`, `Flow_TotMax = 2000000000` | parâmetros do canal de pulsos em um só lugar |
+| Variáveis | `Flow_Pulsos` (Float), `Flow_PulsosTot` (Long), `Flow_PStatus` (Long), `Flow_Primeira` (Dim) | canal de pulsos |
+| Tabela `Vazao1s` | 3 campos **no fim**: `Flow_Pulsos`, `Flow_PulsosTot`, `Flow_PStatus` | os 4 primeiros iguais à v3: o servidor antigo continua lendo |
+| Scan | `PulseCount(Flow_Pulsos,1,P2,Flow_PConfig,0,1,0)` em todo Scan + estado | o `PulseCount` não pode ficar dentro de `If` |
 
-Nenhuma pinagem, faixa, constante física ou formato de mensagem foi alterado.
+## Os dois canais são medidos sempre; o método é escolhido no servidor
 
-## Ligações (as do v3, inalteradas) + a nova
+O CR1000Xe mede a corrente (RG1) **e** os pulsos (P2) em todo Scan e grava os dois. Analógico × Pulso é escolhido na interface (card de
+Vazão) e gravado no `config.json`. **Nada é escrito no datalogger**: a conta continua somente leitura, nada volta ao padrão quando o
+programa reinicia e os dois sinais ficam no histórico (dá para comparar e recalcular).
 
-| Instrumento | Terminais | Instrução |
+`Flow_mode` continua gravado com o valor 2 apenas para o servidor anterior funcionar com este programa (reversão sem trocar o CRBasic).
+
+## Campos de `Vazao1s` (v4)
+
+| Campo | Tipo | Significado |
 |---|---|---|
-| Balança MK30K1 | TX → C6, RX → C5, GND → G (`ComC5`, 9600 8N1) | `SerialOpen/SerialIn/SplitStr` |
-| Termopar tipo T | 1H (+), 1L (−) | `TCDiff(…,1,mV200C,1,TypeT,PTemp_C,True,0,60,1,0)` |
-| Pluviômetro | P1 – G | `PulseCount(…,P1,1,0,1,0)` (fechamento de contato, pull-up) |
-| MAG 5000 4–20 mA | RG1 | `CurrentSE(Flow_mA,1,mV200,RG1,True,0,60,1,0)` |
-| MAG 5000 pulsos (**novo, não validado**) | P2 (+ G) — **saída passiva com pull-up externo**; nunca a saída ativa de 24 V | `PulseCount(Flow_Pulsos,1,P2,3,0,1,0)` |
+| `Flow_mV` | IEEE4 | `Flow_mA × 10` (derivado, só compatibilidade; não é medição) |
+| `Flow_mA` | IEEE4 | corrente em mA, como medida (mesmo fora de 4–20) |
+| `Flow_Status` | Long | 0 = 4 a 20 mA · 1 = abaixo de 4 mA · 2 = acima de 20 mA · 3 = sem leitura (NAN) |
+| `Flow_mode` | Long | sempre 2 (legado) |
+| `Flow_Pulsos` | IEEE4 | pulsos contados **desde o Scan anterior** (contagem, não frequência; exata até 2²⁴) |
+| `Flow_PulsosTot` | Long | acumulado das contagens válidas desde o início do programa; volta a 0 ao reiniciar ou ao passar de 2×10⁹ |
+| `Flow_PStatus` | Long | 0 ok · 1 primeiro Scan (janela incompleta) · 2 contador saturado · 3 acima de 12 kHz · 4 sem leitura |
+
+## Como o servidor usa os pulsos
+
+- **Frequência** `f = Flow_Pulsos ÷ Δt`, com Δt = intervalo real entre o registro e o anterior da mesma tabela (1 s nominal; 2 s se um
+  Scan foi pulado, porque o contador de hardware acumula). Sem registro anterior contíguo (início, lacuna > 2,5 s): Δt = 1 s, marcado
+  como "janela presumida".
+- **Vazão** `Q [L/min] = f ÷ K [pulsos/L] × 60`. K vem da interface (pulsos/L, pulsos/m³, L/pulso ou mL/pulso; guardado em pulsos/L).
+- **Volume do ensaio** = diferença de `Flow_PulsosTot` entre os extremos ÷ K: não perde pulsos de registros ausentes. Se o acumulado
+  diminuir no intervalo (programa reiniciado), volta à soma das contagens e o ensaio registra o motivo.
+- **Comparação entre canais**: com os dois canais, a tela mostra a diferença pulsos − analógico e avisa quando a corrente indica vazão
+  (> 2 % do span) e P2 fica sem pulsos por 5 leituras seguidas (cabo solto, saída desligada, K errado).
+
+## Ligação dos pulsos: NÃO validada. Confirmar antes de ligar
+
+Fontes: manual de operação SITRANS F M MAG 5000/6000 (ed. 05/2006) e especificações de pulso do CR1000X (Campbell Scientific).
+
+| Item | MAG 5000 (manual) | CR1000Xe (especificação CR1000X) | Consequência |
+|---|---|---|---|
+| Saída ativa | 24 V DC, 30 mA, carga 1–10 kΩ | máx. ±20 V nas entradas de pulso | **não ligar a saída ativa direto** em P2 |
+| Saída passiva | 3–30 V DC, máx. 110 mA, carga 200 Ω–10 kΩ | pull-up interno de 100 kΩ a 5 V | precisa de **pull-up externo** dentro de 200 Ω–10 kΩ |
+| Níveis | — | baixo < 0,8 V, alto > 2,5 V | pull-up para o terminal 5V do CR1000Xe atende |
+| Frequência | 0–10 kHz (50 % de ciclo) no modo frequência | alta frequência até 250 kHz; contato seco até 150 Hz | usar alta frequência (`PConfig = 3`) |
+| Isolação | todas as entradas/saídas galvanicamente isoladas | — | ligar o comum da saída ao **G** do CR1000Xe |
+| Terminais | saída digital 56/57/58 | P2 livre (P1 = pluviômetro; C5/C6 = balança) | confirmar a função de cada terminal no diagrama da unidade |
+
+Proposta a ser conferida pelo responsável técnico (não validada): saída digital no modo **passivo**, resistor de 1 a 4,7 kΩ entre o
+terminal de sinal e o **5V** do CR1000Xe, comum no **G**, sinal em **P2**, cabo blindado.
+
+Também confirmar no transmissor: **Q<sub>max</sub>** (deve bater com a vazão em 20 mA configurada), **volume por pulso** ou f<sub>max</sub> (dá o K),
+**largura do pulso** (W21 "pulse overflow" = pulsos perdidos no próprio transmissor), **corte de vazão baixa** (0–9,9 % de Q<sub>max</sub>: zera
+**as duas** saídas) e **constante de tempo** (0,1–30 s: suaviza a saída analógica e a de frequência).
+
+## Fator K
+
+Não existe K padrão do MAG 5000: ele sai da configuração da saída digital.
+- Modo pulso/volume: K = 1 ÷ (volume por pulso). Ex.: 1 mL/pulso → 1000 pulsos/L.
+- Modo frequência: K = f<sub>max</sub> ÷ Q<sub>max</sub> (Q em L/s). Ex.: 10 kHz em 100 L/min (1,667 L/s) → 6000 pulsos/L.
+
+Regra prática de resolução: o ensaio precisa de pelo menos ~1000 pulsos para que 1 pulso pese ≤ 0,1 % do volume (a tela e o resultado
+do ensaio avisam abaixo de 200 pulsos). O `config.json` atual tem **K = 0,01 pulso/L** (1 pulso a cada 100 L), gravado em 27/10 sem
+origem registrada: a 100 L/min isso dá 1 pulso por minuto, e um ensaio de 60 s contaria um único pulso (±100 % de quantização).
+Confirme no transmissor antes de usar o método por pulsos.
 
 ## Como carregar com segurança
 
-1. Salvar o programa atual do datalogger (Device Configuration Utility / LoggerNet → *Retrieve*) e guardar o `.CR1X` junto com `crbasic/`.
-2. Compilar `Pluviometria_v4_vazao_pulsos.CR1X` no CRBasic Editor; resolver avisos. Conferir que `PulseCount` em P2 não está dentro de `If`.
-3. Parar o servidor (`parar.bat`). Enviar o programa. As tabelas são recriadas: na volta o servidor detecta "tabela reiniciada" (âncora some) e recomeça do primeiro registro, **sem apagar o histórico** do banco.
-4. Rodar `python tools\probe_cr1000x.py --host <IP> --user <conta somente leitura> --profile programa_vazao`: deve listar `Vazao1s` com `Flow_mA`, `Flow_Status`, `Flow_mode`, `Flow_Pulsos`, `Flow_PulsosTot`, `Flow_PStatus` e apontar qualquer grafia diferente (`Flow_Mode` × `Flow_mode`).
-5. Iniciar o servidor. No card do medidor (Método Comparativo), o seletor **Pulsos** passa a ser aceito; o card mostra "pulsos solicitado · aguardando…" até a primeira amostra calculada, depois "pulsos ativo · confirmado por dado do datalogger".
-6. Conferir em *Status*: `SkippedScan` = 0, `ProcTime`/`MaxProcTime` < 1000 ms; e em *Numeric Monitor*: `Flow_PStatus = 0`, `Flow_Pulsos` ≥ 0, `Peso_g`, `TempAgua_C`, `Pluvio_Basculadas_1s` normais.
-
-## Como reverter
-
-Reenviar `crbasic/Pluviometria_v3_com_vazao_4-20mA.CR1X`. O perfil `programa_vazao` trata os campos de pulso como opcionais: com o v3 o servidor informa "canal
-indisponível no programa" para pulsos e continua com o 4–20 mA. Se `flow_method` ficou em `pulse`, escolher **Analógico 4–20 mA** no card (ou editar `config.json`).
-
-## Pendências que dependem da bancada
-- Compilar/carregar o v4 e conferir os campos (passo 4).
-- Ligação da saída de pulsos (modo passivo, pull-up externo, terminais 56/57/58, polaridade) — `docs/TEMPORIZACAO_E_PULSOS.md`, seção 6.
-- Fator K, Qmax e corte de vazão baixa lidos no menu do MAG 5000.
+1. Guarde o programa atual (já está em `crbasic/Pluviometria_v3_com_vazao_4-20mA.CR1X`) e faça o backup do projeto.
+2. Compile `Pluviometria_v4_vazao_pulsos.CR1X` no CRBasic Editor; resolva avisos.
+3. Envie pelo LoggerNet/Device Configuration Utility. As tabelas são recriadas: o servidor detecta o reinício pela âncora (número e
+   horário do último registro) e recomeça do primeiro registro, sem regravar o histórico.
+4. Numeric Monitor: `Flow_Status = 0`, `Flow_mA` igual ao de antes, `Flow_PStatus` 1 no primeiro Scan e 0 depois, `Peso_g`,
+   `TempAgua_C` e `Pluvio_Basculadas_1s` normais. Tabela `Status`: `SkippedScan` não aumenta.
+5. `python tools\probe_cr1000x.py --host <IP> --user <conta> --profile programa_vazao`: sem ERRO.
+6. Só então ligue a saída de pulsos (seção acima) e confira contagem conhecida (gerador de pulsos ou totalizador do MAG).

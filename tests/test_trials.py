@@ -14,7 +14,7 @@ class Env:
         self.cfg = dict(CFG, **(cfg or {}))
         self.db = sqlite3.connect(":memory:", check_same_thread=False)
         self.db.executescript("""CREATE TABLE samples(ts INTEGER PRIMARY KEY, mass_g REAL, temp_c REAL, mass_status TEXT, temp_status TEXT,
-          tips_total INTEGER, cor_ma REAL, cor_status TEXT, flow_mode TEXT, flow_pulses REAL, flow_hz REAL, flow_pulses_total INTEGER, pulse_status TEXT);
+          tips_total INTEGER, cor_ma REAL, cor_status TEXT, flow_mode TEXT, flow_pulses REAL, flow_hz REAL);
           CREATE TABLE tips(ts INTEGER, src TEXT); CREATE UNIQUE INDEX ux ON tips(src);""")
         self.lock = threading.Lock()
         self.tr = Trials(self.db, self.lock, lambda: self.cfg, lambda: self.db.execute("SELECT MAX(ts) FROM samples").fetchone()[0])
@@ -22,8 +22,8 @@ class Env:
 
     def add(self, sec, mass=None, temp=22.0, mode=None, pulses=None, hz=None, ma=None, cor_status=None, tip=0, mass_status=None):
         ts = T0 + sec * 1000
-        self.db.execute("INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (ts, mass, temp, mass_status or ("ok" if mass is not None else "no_comm"), "ok", 0, ma, cor_status, mode, pulses, hz, None, None))
+        self.db.execute("INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (ts, mass, temp, mass_status or ("ok" if mass is not None else "no_comm"), "ok", 0, ma, cor_status, mode, pulses, hz))
         for k in range(tip):
             self.n += 1
             self.db.execute("INSERT INTO tips VALUES(?,?)", (ts, f"t{self.n}"))

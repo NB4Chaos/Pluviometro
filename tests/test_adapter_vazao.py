@@ -1,152 +1,201 @@
-"""Adaptador CR1000X lendo a tabela Vazao1s dos programas v3 (em uso) e v4 (pulsos), e o cursor por registro-âncora.
-Emulador com dados fictícios: só a lógica é testada."""
-import json, os, sys
+"""Adaptador lendo a tabela Vazao1s dos programas reais (emulador com dados FICTÍCIOS, só para testar a lógica).
+v3 = programa em uso (só 4–20 mA); v4 = programa novo (4–20 mA + pulsos em P2). O adaptador entrega o dado BRUTO;
+classificar faixa, alarme e validade é do servidor (calc.flow_reading)."""
+import os, sys
+from datetime import timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
-from datalogger import CR1000X, _ts_ms
-from tests.fake_programa_atual import Fake
+from datalogger import CR1000X, load_profile
+from tests.fake_programa_atual import Fake, VAZAO_V3, VAZAO_V4
 
 
 @pytest.fixture
-def v4():
+def fake():
     f = Fake(prefill=30, tip_every=20, schema="v4")
     yield f
     f.stop()
 
 
 @pytest.fixture
-def v3():
+def fake_v3():
     f = Fake(prefill=30, tip_every=20, schema="v3")
     yield f
     f.stop()
 
 
-def adapter(fake, tmp_path, name="c.json", profile="programa_vazao"):
-    return CR1000X(address=f"127.0.0.1:{fake.port}", user="dash", password="segredo", cursor_file=str(tmp_path / name), profile=profile)
+def adapter(fake, tmp_path, name="c.json"):
+    return CR1000X(address=f"127.0.0.1:{fake.port}", user="dash", password="segredo", cursor_file=str(tmp_path / name), profile="programa_vazao")
 
 
-# ---------------- programa v3 em uso: só o canal analógico existe
-def test_v3_traz_corrente_bruta_e_declara_so_o_canal_analogico(v3, tmp_path):
-    r = adapter(v3, tmp_path).read()[-1]
-    assert r.cor_ma == pytest.approx(12.0) and r.cor_status == "ok"
-    assert r.flow_channels == {"analog": True, "pulse": False}
-    assert r.flow_pulses is None and r.flow_pulses_total is None and r.pulse_status is None
+def fresh(fake, tmp_path):
+    a = adapter(fake, tmp_path); a.read(); a.ack()
+    return a
 
 
-def test_v3_corrente_fora_da_faixa_chega_bruta_ao_servidor(v3, tmp_path):
-    a = adapter(v3, tmp_path); a.read(); a.ack()
-    v3.flow_ma = 3.2                     # Flow_Status = 1 no datalogger; quem classifica (tolerância, falha) é o servidor
-    v3.tick(sleep=False)
+# ---------------------------------------------------------------- campos e nomes (o erro Flow_Mode × Flow_mode não volta)
+def test_campos_obrigatorios_do_perfil_existem_no_programa_em_uso_com_a_grafia_exata():
+    fl = load_profile("programa_vazao")["flow"]
+    v3 = {n for n, _ in VAZAO_V3}
+    required = {fl[k] for k in ("ma", "status") if k not in fl.get("optional", [])}
+    assert required <= v3, required - v3
+    assert fl["mode"] == "Flow_mode" and "Flow_Mode" not in v3   # grafia real do campo: 'm' minúsculo
+    assert {fl["pulses"], fl["pulses_total"], fl["pulse_status"]} <= {n for n, _ in VAZAO_V4}
+
+
+def test_programa_v4_traz_os_dois_canais_brutos(fake, tmp_path):
+    a = fresh(fake, tmp_path)
+    fake.tick(sleep=False)
     r = a.read()[-1]
-    assert r.cor_ma == pytest.approx(3.2) and r.cor_status == "ok"
+    assert r.flow_has == ("analog", "pulse") and a.flow_has == ("analog", "pulse")
+    assert r.cor_status == "ok" and r.cor_ma == pytest.approx(12.0) and r.flow_ma_code == 0
+    assert r.flow_pulses == 100.0 and r.flow_pulse_code == 0 and r.flow_pulses_total == fake.ptotal
+    assert r.flow_dt_ms == 1000 and r.flow_hz is None      # frequência é calculada no servidor, com a janela real
 
 
-def test_v3_corrente_nan_e_leitura_invalida_nao_zero(v3, tmp_path):
-    a = adapter(v3, tmp_path); a.read(); a.ack()
-    v3.flow_ma = "NAN"
-    v3.tick(sleep=False)
+def test_programa_v3_em_uso_so_tem_o_canal_analogico(fake_v3, tmp_path):
+    r = adapter(fake_v3, tmp_path).read()[-1]
+    assert r.flow_has == ("analog",) and r.cor_ma == pytest.approx(12.0)
+    assert r.flow_pulses is None and r.flow_pulses_total is None and r.flow_pulse_code is None
+
+
+@pytest.mark.parametrize("ma, code", [(3.2, 1), (0.02, 1), (20.6, 2), (3.99, 1)])
+def test_corrente_fora_da_faixa_chega_bruta_e_com_o_codigo(fake, tmp_path, ma, code):
+    a = fresh(fake, tmp_path)
+    fake.flow_ma = ma
+    fake.tick(sleep=False)
     r = a.read()[-1]
-    assert r.cor_ma is None and r.cor_status == "invalid"
+    assert r.cor_status == "ok" and r.cor_ma == pytest.approx(ma) and r.flow_ma_code == code   # antes: mA descartado, vira "inválida"
 
 
-# ---------------- programa v4: os dois canais chegam em todo Scan
-def test_v4_traz_pulsos_brutos_acumulado_e_corrente(v4, tmp_path):
-    rs = adapter(v4, tmp_path).read()
-    r = rs[-1]
-    assert r.flow_channels == {"analog": True, "pulse": True}
-    assert r.flow_pulses == 100 and r.pulse_status == "ok" and r.flow_hz == pytest.approx(100.0)   # Scan de 1 s
-    assert r.flow_pulses_total == v4.pulses_total and rs[-2].flow_pulses_total == v4.pulses_total - 100
-    assert r.cor_ma == pytest.approx(12.0) and r.cor_status == "ok"
-
-
-def test_v4_zero_pulsos_e_leitura_valida(v4, tmp_path):
-    a = adapter(v4, tmp_path); a.read(); a.ack()
-    v4.pulses_per_s = 0
-    v4.tick(sleep=False)
+def test_corrente_nan_nao_vira_numero(fake, tmp_path):
+    a = fresh(fake, tmp_path)
+    fake.flow_ma = "NAN"
+    fake.tick(sleep=False)
     r = a.read()[-1]
-    assert r.pulse_status == "ok" and r.flow_pulses == 0 and r.flow_hz == 0.0
+    assert r.cor_ma is None and r.flow_ma_code == 3
 
 
-@pytest.mark.parametrize("code", [1, 2, 3, 4])
-def test_v4_pstatus_diferente_de_zero_invalida_so_o_canal_de_pulsos(v4, tmp_path, code):
-    a = adapter(v4, tmp_path); a.read(); a.ack()
-    v4.pstatus = code
-    v4.tick(sleep=False)
+def test_primeiro_scan_do_programa_marca_a_contagem(tmp_path):
+    f = Fake(prefill=3, schema="v4")
+    try:
+        rs = adapter(f, tmp_path).read()
+        assert rs[0].flow_pulse_code == 1 and all(r.flow_pulse_code == 0 for r in rs[1:])
+    finally:
+        f.stop()
+
+
+def test_zero_pulsos_e_leitura_valida_nao_ausencia(fake, tmp_path):
+    a = fresh(fake, tmp_path)
+    fake.flow_hz = 0.0
+    fake.tick(sleep=False)
     r = a.read()[-1]
-    assert r.pulse_status == "invalid" and r.flow_pulses is None and r.flow_hz is None
-    assert r.cor_status == "ok" and r.cor_ma == pytest.approx(12.0)      # canais independentes
+    assert r.cor_status == "ok" and r.flow_pulses == 0.0 and r.flow_pulse_code == 0
 
 
-def test_programa_sem_vazao_nao_declara_canal_nenhum(v4, tmp_path):
-    r = adapter(v4, tmp_path, profile="programa_atual").read()[-1]
-    assert r.flow_channels == {"analog": False, "pulse": False} and r.cor_status is None and r.pulse_status is None
+def test_scan_pulado_aumenta_a_janela_de_contagem(fake, tmp_path):
+    a = fresh(fake, tmp_path)
+    fake.t += timedelta(seconds=1)                 # um Scan pulado: o registro seguinte cobre 2 s
+    fake.tick(sleep=False)
+    assert a.read()[-1].flow_dt_ms == 2000
 
 
-# ---------------- cursor por registro-âncora (o defeito de produção: pedir registro inexistente → API devolve do mais antigo)
-def test_sem_registro_novo_nao_rele_o_historico_nem_declara_reinicio(v4, tmp_path):
-    a = adapter(v4, tmp_path)
-    assert len(a.read()) >= 25; a.ack()
-    for _ in range(3):                      # o emulador responderia "do mais antigo" a um pedido de registro inexistente
-        assert a.read() == []
+def test_programa_atual_sem_tabela_de_vazao_fica_sem_modo(fake, tmp_path):
+    a = CR1000X(address=f"127.0.0.1:{fake.port}", user="dash", password="segredo", cursor_file=str(tmp_path / "x.json"), profile="programa_atual")
+    r = a.read()[-1]
+    assert r.flow_mode is None and r.cor_status is None and r.flow_has == ()
+
+
+# ---------------------------------------------------------------- registro âncora: o defeito do histórico regravado
+def test_consulta_antes_da_gravacao_nao_vira_reinicio_falso(fake, tmp_path):
+    """A API real responde a partir do registro MAIS ANTIGO quando se pede um registro ainda não gravado. Antes isso era lido
+    como 'tabela reiniciada': relia a tabela inteira e regravava horas de histórico com temperatura e vazão vazias."""
+    a = fresh(fake, tmp_path)
+    for _ in range(3):
+        assert a.read() == []                      # nada novo: só a âncora volta e é descartada
         a.ack()
-    assert a.restarts == 0 and a.gaps == 0 and all(a.join_miss.get(t, 0) == 0 for t in a.join_miss)
-    v4.tick(sleep=False)
-    new = a.read()
-    assert len(new) == 1 and a.restarts == 0
+    assert a.restarts == 0 and a.gaps == 0 and not a.join_miss
+    fake.tick(sleep=False)
+    got = a.read()
+    assert len(got) == 1 and got[0].temp_status == "ok" and got[0].cor_status == "ok"
 
 
-def test_cursor_guardado_e_o_ultimo_registro_recebido_com_horario(v4, tmp_path):
-    a = adapter(v4, tmp_path); rs = a.read(); a.ack()
-    cur = json.load(open(tmp_path / "c.json"))
-    anc = cur["Balanca1s"]
-    assert anc["no"] == v4.tables["Balanca1s"][-1][0] and _ts_ms(anc["time"]) == rs[-1].ts
-
-
-def test_cursor_antigo_proximo_registro_e_migrado_sem_reler(v4, tmp_path):
-    nxt = v4.tables["Balanca1s"][-1][0] - 4              # formato antigo: "próximo registro a pedir"
-    json.dump({t: v4.tables[t][-1][0] - 4 for t in ("Balanca1s", "Termopar1s", "Pluviometro1s", "Vazao1s")}, open(tmp_path / "c.json", "w"))
-    rs = adapter(v4, tmp_path).read()
-    assert len(rs) == 5 and rs[0].ts == _ts_ms(v4.tables["Balanca1s"][nxt][1])
-
-
-def test_reinicio_real_do_programa_e_detectado_sem_duplicar(v4, tmp_path):
-    a = adapter(v4, tmp_path); a.read(); a.ack()
-    v4.restart_program()
+def test_reinicio_real_do_programa_e_detectado_e_so_entrega_dados_novos(fake, tmp_path):
+    a = fresh(fake, tmp_path)
+    last = a.seen["Balanca1s"]
+    fake.restart_program()
     for _ in range(5):
-        v4.tick(sleep=False)
-    rs = a.read(); a.ack()
-    assert len(rs) == 5 and a.restarts >= 1 and len({r.ts for r in rs}) == 5
-    assert rs[-1].flow_pulses_total == 500                  # acumulado voltou a zero com o programa
+        fake.tick(sleep=False)
+    got = a.read()
+    assert a.restarts >= 1 and len(got) == 5 and all(r.ts > last for r in got)
+    assert all(r.temp_status == "ok" and r.cor_status == "ok" for r in got)
+    assert got[0].flow_pulse_code == 1 and got[0].flow_dt_ms is None   # contador zerado: 1o Scan e janela desconhecida
 
 
-def test_registros_perdidos_no_anel_sao_contados_como_lacuna(v4, tmp_path):
-    a = adapter(v4, tmp_path); a.read(); a.ack()
-    for _ in range(10):
-        v4.tick(sleep=False)
-    for t in v4.tables:                                      # os 35 mais antigos saíram do anel, inclusive a âncora
-        v4.drop_oldest(t, 35)
-    rs = a.read()
-    assert a.gaps >= 1 and a.restarts == 0 and len(rs) >= 1
+def test_tabela_recriada_que_ja_passou_do_numero_antigo_e_relida_desde_o_inicio(fake, tmp_path):
+    a = fresh(fake, tmp_path)
+    n = fake.next_no["Balanca1s"]
+    fake.restart_program()
+    for _ in range(n + 5):                         # a tabela nova já tem mais registros que o cursor antigo
+        fake.tick(sleep=False)
+    got = a.read()
+    assert a.restarts >= 1 and len(got) == n + 5
 
 
+def test_ancora_sobrescrita_na_memoria_circular_vira_lacuna(tmp_path):
+    f = Fake(prefill=20, ring=30, schema="v4")
+    try:
+        a = adapter(f, tmp_path); a.read(); a.ack()
+        for _ in range(60):                        # 60 registros novos numa memória de 30: a âncora some
+            f.tick(sleep=False)
+        got = a.read()
+        assert a.gaps >= 1 and a.restarts == 0 and len(got) == 30
+    finally:
+        f.stop()
+
+
+def test_cursor_guarda_o_horario_da_ancora(fake, tmp_path):
+    import json
+    a = fresh(fake, tmp_path)
+    saved = json.load(open(tmp_path / "c.json", encoding="utf-8"))
+    assert saved["Balanca1s"] == fake.next_no["Balanca1s"] and saved["_anchor_time"]["Balanca1s"] == fake.tables["Balanca1s"][-1][1]
+    b = adapter(fake, tmp_path)                    # servidor reiniciado: continua do cursor, sem reler
+    fake.tick(sleep=False)
+    assert len(b.read()) == 1 and b.restarts == 0
+
+
+# ---------------------------------------------------------------- junção entre tabelas
 def _shift_table(fake, table, ms):
-    from datetime import datetime, timedelta
-
+    from datetime import datetime
     def sh(t):
         return (datetime.strptime(t[:21], "%Y-%m-%dT%H:%M:%S.%f") + timedelta(milliseconds=ms)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-4]
     fake.tables[table] = [(no, sh(t), v) for no, t, v in fake.tables[table]]
 
 
-def test_juncao_tolera_diferenca_de_ms_entre_tabelas(v4, tmp_path):
-    _shift_table(v4, "Termopar1s", 300)
-    a = adapter(v4, tmp_path)
+def test_juncao_tolera_diferenca_de_ms_entre_tabelas(fake, tmp_path):
+    # horário do termopar deslocado 300 ms em relação ao da balança: antes virava "sem comunicação" em TODAS as linhas
+    _shift_table(fake, "Termopar1s", 300)
+    a = adapter(fake, tmp_path)
     r = a.read()
     assert len(r) >= 25 and all(x.temp_status == "ok" and x.temp_c is not None for x in r)
     assert not a.join_miss
 
 
-def test_juncao_alem_da_tolerancia_continua_sendo_sem_comunicacao_e_conta(v4, tmp_path):
-    _shift_table(v4, "Termopar1s", 2000)
-    a = adapter(v4, tmp_path)
+def test_juncao_alem_da_tolerancia_continua_sendo_sem_comunicacao_e_conta(fake, tmp_path):
+    _shift_table(fake, "Termopar1s", 2000)       # 2 s: fora da tolerância de 0,5 s
+    a = adapter(fake, tmp_path)
     r = a.read()
     assert any(x.temp_status == "no_comm" for x in r) and a.join_miss.get("Termopar1s", 0) > 0
+
+
+# ---------------------------------------------------------------- leitura das tabelas em paralelo (DATALOGGER_PARALLEL=1, desligada por padrão)
+def test_leitura_paralela_entrega_o_mesmo_que_a_sequencial(fake, tmp_path, monkeypatch):
+    seq = adapter(fake, tmp_path, "seq.json")
+    monkeypatch.setenv("DATALOGGER_PARALLEL", "1")
+    par = adapter(fake, tmp_path, "par.json")
+    assert par.parallel and not seq.parallel
+    for _ in range(3):   # leitura inicial e mais duas rodadas com registros novos
+        a, b = seq.read(), par.read()
+        assert a and a == b
+        assert (seq.pending, seq.gaps, seq.restarts) == (par.pending, par.gaps, par.restarts)
+        seq.ack(); par.ack()
+        fake.tick(sleep=False)

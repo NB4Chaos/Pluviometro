@@ -43,7 +43,7 @@ app = start(__import__("tempfile").gettempdir() + "/e2e_atual1.log"); time.sleep
 s, summ = api("/api/summary")
 ok("modo real: o servidor NAO se declara demonstracao", s == 200 and "demo" not in summ and summ["link"]["connected"] is True and summ["mode"] == "cr1000x")
 s, html = api("/")
-ok("interface fala em termopar tipo T e traz o indicador de conexão com o datalogger (30/10: pill única #conn)", "termopar tipo T" in html and 'id="conn"' in html and "PT100" not in html)
+ok("interface fala em termopar tipo T e traz o indicador de dados reais", "termopar tipo T" in html and 'id="real"' in html and "PT100" not in html)
 c = db(); n = c.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
 ok(f"historico do datalogger recuperado: {n} amostras (300 de backlog + as geradas)", n >= 300)
 lat = summ["latest"]
@@ -82,7 +82,9 @@ ok(f"os segundos da queda foram recuperados (+{len(ts) - n0} amostras)", len(ts)
 # reinicio do servidor
 ns, nt = len(ts), c.execute("SELECT COUNT(*) FROM tips").fetchone()[0]
 app.terminate(); app.wait(timeout=10); time.sleep(5)
-ok("cursor gravado em disco para as 3 tabelas", set(json.load(open(os.path.join(DATA, "cursor_cr1000x.json")))) == {"Balanca1s", "Termopar1s", "Pluviometro1s"})
+_cur = json.load(open(os.path.join(DATA, "cursor_cr1000x.json")))
+ok("cursor gravado em disco para as 3 tabelas, com o horário do último registro de cada uma (âncora)",
+   {k for k in _cur if not k.startswith("_")} == {"Balanca1s", "Termopar1s", "Pluviometro1s"} == set(_cur.get("_anchor_time", {})))
 app = start(__import__("tempfile").gettempdir() + "/e2e_atual2.log"); time.sleep(10)
 c = db(); ns2, d = c.execute("SELECT COUNT(*), COUNT(DISTINCT ts) FROM samples").fetchone(); nt2, dt = c.execute("SELECT COUNT(*), COUNT(DISTINCT src) FROM tips").fetchone()
 ok(f"apos reiniciar o servidor nao duplicou amostras ({ns} -> {ns2})", ns2 == d and 0 < ns2 - ns <= 25)

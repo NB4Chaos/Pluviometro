@@ -41,6 +41,26 @@ def test_campo_do_perfil_que_nao_existe_no_programa_e_apontado(fake, tmp_path):
     assert code != 0 and "Peso_inexistente" in texts(res) and "Balanca1s" in texts(res)
 
 
+def test_campo_do_medidor_com_grafia_errada_e_apontado(fake, tmp_path):
+    """O perfil já esperou Flow_Mode quando o programa grava Flow_mode: o diagnóstico precisa acusar isso (antes ignorava o bloco flow)."""
+    import json
+    prof = json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "profiles", "programa_vazao.json")))
+    prof["flow"]["optional"] = [k for k in prof["flow"]["optional"] if k != "mode"]
+    prof["flow"]["mode"] = "Flow_Mode"
+    path = tmp_path / "grafia.json"; path.write_text(json.dumps(prof))
+    code, res = probe(fake, profile=str(path))
+    assert code != 0 and "Flow_Mode" in texts(res) and "outra grafia" in texts(res) and "Flow_mode" in texts(res)
+
+
+def test_programa_v3_sem_pulsos_passa_e_informa_os_campos_opcionais(tmp_path):
+    f = Fake(prefill=5, schema="v3")
+    try:
+        code, res = probe(f, profile="programa_vazao")
+        assert code == 0 and "Flow_Pulsos" in texts(res) and "programa v4" in texts(res)
+    finally:
+        f.stop()
+
+
 def test_conta_com_acesso_total_gera_aviso(fake):
     fake.level = 1
     code, res = probe(fake)

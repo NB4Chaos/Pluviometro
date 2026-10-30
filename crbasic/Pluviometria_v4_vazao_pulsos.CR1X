@@ -1,20 +1,13 @@
 '==================================================================
-' AQUISICAO DE CALIBRACAO - CR1000Xe
+' AQUISICAO DE CALIBRACAO - CR1000Xe  (v4 - 28/10/2026)
 ' Balanca MK30K1 + Termopar tipo T + Pluviometro de contato seco
-' + Medidor de vazao SITRANS FM MAG 5000: 4-20 mA (RG1) e PULSOS (P2)
+' + Medidor de vazao Siemens SITRANS FM MAG 5000 (4-20 mA E pulsos)
 '
-' v4 (29/10/2026): derivado do Pluviometria_v3_com_vazao_4-20mA.CR1X EM USO.
-'   Balanca, termopar, pluviometro e o 4-20 mA em RG1 sao IDENTICOS ao v3.
-'   Acrescimos: um unico PulseCount em P2 (alta frequencia, pull-up) com a
-'   CONTAGEM BRUTA por Scan (Flow_Pulsos), o acumulado desde o inicio do
-'   programa (Flow_PulsosTot) e o estado do canal (Flow_PStatus).
-'   Correcao: Flow_mA = NAN agora sai com Flow_Status = 3 (sem leitura);
-'   no v3 saia com Flow_Status = 0.
-'   Os 4 primeiros campos de Vazao1s sao os mesmos do v3: o servidor com o
-'   perfil programa_vazao le os dois programas (campos de pulso opcionais).
-'   *** NAO COMPILADO: nao havia CRBasic Editor nesta maquina. Compile,
-'   *** leia os avisos e confira os nomes dos campos com
-'   *** tools/probe_cr1000x.py antes de confiar nos dados.
+' Base: Pluviometria_v3_com_vazao_4-20mA.CR1X (programa em uso).
+' Balanca, termopar e pluviometro estao IDENTICOS a v3. O que muda:
+'   1. Canal de pulsos do medidor de vazao em P2 (novo).
+'   2. Flow_Status = 3 quando a corrente vem NAN (na v3 uma leitura NAN
+'      saia com Flow_Status = 0, porque NAN < 4 e NAN > 20 sao falsos).
 '
 ' BALANCA:
 '   ComC5 / C5-C6
@@ -32,40 +25,51 @@
 '   Resolucao configurada: 0,2 mm/basculada
 '   Confirmar a resolucao real do sensor.
 '
-' MEDIDOR DE VAZAO 4-20 mA (igual ao v3):
-'   Leitura pela entrada de corrente nativa RG1 usando CurrentSE().
-'   Flow_mA = corrente medida em mA.
-'   Flow_mV = valor derivado (Flow_mA x 10), apenas para compatibilidade.
-'   Flow_Status: 0 = 4 a 20 mA; 1 = abaixo de 4 mA; 2 = acima de 20 mA;
-'                3 = sem leitura (NAN).
-'   A conversao para vazao/unidade de engenharia ocorre no servidor Python.
+' MEDIDOR DE VAZAO - OS DOIS CANAIS SAO MEDIDOS EM TODO SCAN:
+'   Analogico 4-20 mA: entrada de corrente nativa RG1, CurrentSE() (igual a v3).
+'     Flow_mA = corrente medida em mA.
+'     Flow_mV = Flow_mA x 10 (derivado, so compatibilidade; nao e medicao).
+'     Flow_Status: 0 = 4 a 20 mA | 1 = abaixo de 4 mA | 2 = acima de 20 mA
+'                  | 3 = sem leitura (NAN)
+'   Pulsos: P2, PulseCount() em alta frequencia, contagem por Scan.
+'     Flow_Pulsos    = pulsos contados desde o Scan anterior (janela de
+'                      contagem = intervalo real entre dois Scans, 1 s
+'                      nominal; NAO e frequencia).
+'     Flow_PulsosTot = contador acumulado (Long) desde o inicio do programa;
+'                      soma so as contagens validas; volta a 0 ao reiniciar
+'                      o programa ou ao passar de 2.000.000.000.
+'     Flow_PStatus: 0 = ok | 1 = primeiro Scan (janela incompleta)
+'                  | 2 = contador saturado | 3 = acima de Flow_PulsoMax_Hz
+'                  | 4 = sem leitura (NAN)
+'     So contagens com Flow_PStatus = 0 entram em Flow_PulsosTot.
+'   Flow_mode = 2 sempre: mantido so para o servidor anterior continuar
+'     funcionando com este programa. O METODO usado no calculo da vazao
+'     (analogico ou pulsos) e escolhido no SERVIDOR (interface, card de
+'     Vazao). Trocar o metodo NAO exige alterar nem escrever no datalogger.
+'   Fator K, faixa 4-20 mA e unidades ficam no servidor (uma so conversao).
 '
-' MEDIDOR DE VAZAO - PULSOS (novo):
-'   Saida digital do MAG 5000 em P2. ATENCAO (datasheet Siemens FI 01 e
-'   especificacoes do CR1000X):
-'     - a saida ATIVA do MAG 5000 e de 24 V DC / 30 mA: NAO LIGAR em P2,
-'       que aceita no maximo +-20 V DC;
-'     - usar a saida PASSIVA (3-30 V DC, carga 200 ohm a 10 kohm) com
-'       resistor de pull-up externo (o pull-up interno de P2 e de 100 kohm,
-'       fora da faixa de carga do Siemens). Valor do resistor, terminais
-'       (56/57/58) e polaridade: CONFIRMAR no manual de operacao e na
-'       etiqueta da unidade. Nada aqui foi validado na bancada.
-'     - frequencia maxima do MAG 5000: 10 kHz (50 % de ciclo). P2 em alta
-'       frequencia aceita 250 kHz; contador de 24 bits (16.777.216/Scan).
-'   PulseCount(Flow_Pulsos,1,P2,3,0,1,0): PConfig 3 = alta frequencia com
-'   pull-up; POption 0 = CONTAGEM no Scan (nao frequencia). Executa em TODO
-'   Scan (a documentacao proibe PulseCount dentro de If/Sub/SlowSequence).
-'   Flow_Pulsos    = pulsos contados no Scan (bruto; 0 e valido)
-'   Flow_PulsosTot = soma das contagens validas desde o inicio do programa
-'                    (reinicia com o programa; o servidor usa a DIFERENCA
-'                    entre o fim e o inicio do ensaio e detecta o reinicio)
-'   Flow_PStatus   = 0 valido | 1 primeiro Scan (porta ainda sem intervalo
-'                    de contagem) | 2 saturado (>= 16777216) | 3 acima de
-'                    12 kHz (acima do que o MAG 5000 gera: sinal suspeito)
-'                    | 4 sem leitura (NAN)
-'   Flow_mode e mantido em 2 por compatibilidade com o perfil anterior; o
-'   METODO (analogico ou pulsos) e escolhido no servidor, que recebe os
-'   dois canais em todo Scan. Nada e escrito no datalogger.
+' LIGACAO DOS PULSOS - NAO VALIDADA. CONFIRMAR ANTES DE LIGAR:
+'   - Saida digital do MAG 5000 no modo PASSIVO (3-30 V DC, carga de
+'     200 ohm a 10 kohm, max. 110 mA). O modo ATIVO fornece 24 V DC e
+'     excede o maximo de +-20 V das entradas de pulso do CR1000Xe.
+'   - Resistor de pull-up EXTERNO dentro da faixa de carga do MAG (ex.: 1 a
+'     4,7 kohm para o terminal 5V do CR1000Xe). O pull-up interno de 100 kohm
+'     fica fora da faixa de carga exigida pela saida passiva.
+'   - Comum da saida digital ligado ao G do CR1000Xe (as saidas do MAG sao
+'     galvanicamente isoladas).
+'   - Terminais da saida digital no MAG 5000: 56/57/58 segundo o manual;
+'     confirmar a funcao de cada um no diagrama da sua unidade.
+'   - Frequencia maxima do MAG 5000: 10 kHz. P2 em alta frequencia: 250 kHz.
+'   - O corte de vazao baixa do MAG (0 a 9,9 % de Qmax) zera TODAS as saidas.
+'
+' v3 (22/10/2026): sinal negativo lido do 1o caractere da linha (SplitStr
+'   ignora o "-" quando ha espacos entre o sinal e o numero).
+' v2 (22/10/2026): o laco da balanca esvazia o buffer serial a cada Scan
+'   (ate 100 linhas) e usa a ULTIMA linha completa. Antes lia no maximo 8
+'   linhas/Scan: com a balanca transmitindo mais que isso, o buffer de
+'   1000 bytes enchia e a massa exibida ficava segundos atrasada.
+'   NBufIni = bytes pendentes no inicio do Scan (diagnostico: deve ficar
+'   perto de 0 em regime).
 '
 ' IMPORTANTE:
 '   Sem dados simulados.
@@ -86,9 +90,17 @@ Const Pluvio_mmPorBasculada = 0.2
 Const Flow_Min_mA = 4.0
 Const Flow_Max_mA = 20.0
 
-' Pulsos: intervalo do Scan (s) e limite de plausibilidade (Hz)
+' Canal de pulsos do medidor de vazao (P2)
+' PConfig 3 = alta frequencia com pull-up (confirmar com a ligacao real)
+Const Flow_PConfig = 3
+' Intervalo do Scan em segundos: mantenha igual ao Scan(1,Sec,0,0)
 Const ScanSeg = 1
-Const Flow_PMaxHz = 12000
+' Acima disto e impossivel para o MAG 5000 (max. 10 kHz): ruido ou ligacao
+Const Flow_PulsoMax_Hz = 12000
+' Contador de 24 bits do PulseCount: valor maximo por Scan
+Const Flow_PulsoSat = 16777215
+' O acumulado volta a 0 antes de estourar o Long
+Const Flow_TotMax = 2000000000
 
 '-------------------------
 ' Variaveis da balanca
@@ -123,16 +135,12 @@ Public Pluvio_Total As Float
 Public Pluvio_Chuva_mm As Float
 
 '-------------------------
-' Variaveis do medidor de vazao 4-20 mA
+' Variaveis do medidor de vazao
 '-------------------------
 Public Flow_mA As Float
 Public Flow_mV As Float
 Public Flow_Status As Long
 Public Flow_mode As Long
-
-'-------------------------
-' Variaveis do medidor de vazao - pulsos (P2)
-'-------------------------
 Public Flow_Pulsos As Float
 Public Flow_PulsosTot As Long
 Public Flow_PStatus As Long
@@ -187,7 +195,7 @@ DataTable(Pluviometro1s,True,20000)
 EndTable
 
 '==================================================================
-' TABELA DO MEDIDOR DE VAZAO: 4-20 mA (campos do v3) + PULSOS (v4)
+' TABELA DO MEDIDOR DE VAZAO (os 4 primeiros campos iguais a v3)
 '==================================================================
 DataTable(Vazao1s,True,20000)
   DataInterval(0,1,Sec,10)
@@ -225,7 +233,6 @@ BeginProg
   Flow_mV = NAN
   Flow_Status = 3
   Flow_mode = 2
-
   Flow_Pulsos = NAN
   Flow_PulsosTot = 0
   Flow_PStatus = 1
@@ -250,8 +257,12 @@ BeginProg
     TCDiff(TempAgua_C,1,mV200C,1,TypeT,PTemp_C,True,0,60,1,0)
 
     '============================================================
-    ' MEDIDOR DE VAZAO - SAIDA DE CORRENTE 4-20 mA EM RG1 (igual ao v3)
+    ' MEDIDOR DE VAZAO - CANAL ANALOGICO 4-20 mA EM RG1
     ' CurrentSE retorna a corrente diretamente em mA.
+    ' RG1/RG2 sao entradas de corrente dedicadas do CR1000Xe.
+    ' Flow_mV e derivado da queda na resistencia interna de 10 ohms
+    ' para compatibilidade com perfis antigos; nao usar como sinal
+    ' independente do sensor.
     '============================================================
     Flow_mode = 2
     CurrentSE(Flow_mA,1,mV200,RG1,True,0,60,1,0)
@@ -268,27 +279,32 @@ BeginProg
     EndIf
 
     '============================================================
-    ' MEDIDOR DE VAZAO - PULSOS EM P2 (novo)
-    ' Contagem BRUTA no Scan; PulseCount roda em todo Scan.
+    ' MEDIDOR DE VAZAO - CANAL DE PULSOS EM P2
+    ' PulseCount roda em TODO Scan (nao pode ficar dentro de If ou
+    ' sub-rotina). POption 0 = contagem: o contador de hardware conta
+    ' entre duas execucoes, sem perder pulsos; se um Scan for pulado,
+    ' a contagem seguinte inclui o intervalo inteiro.
+    ' Sem sinal ligado, a contagem e 0 (nao da para distinguir "sem
+    ' vazao" de "cabo solto" so pela contagem: o servidor compara com
+    ' o canal analogico).
     '============================================================
-    PulseCount(Flow_Pulsos,1,P2,3,0,1,0)
+    PulseCount(Flow_Pulsos,1,P2,Flow_PConfig,0,1,0)
 
     If Flow_Primeira = True Then
+      ' a 1a execucao so arma o contador: janela incompleta
       Flow_PStatus = 1
-      Flow_Pulsos = NAN
       Flow_Primeira = False
     ElseIf Flow_Pulsos = NAN Then
+      ' sem leitura: nunca somar NAN ao acumulado (Long)
       Flow_PStatus = 4
-    ElseIf Flow_Pulsos >= 16777216 Then
+    ElseIf Flow_Pulsos >= Flow_PulsoSat Then
       Flow_PStatus = 2
-      Flow_Pulsos = NAN
-    ElseIf Flow_Pulsos > Flow_PMaxHz * ScanSeg Then
+    ElseIf Flow_Pulsos > Flow_PulsoMax_Hz * ScanSeg Then
       Flow_PStatus = 3
-      Flow_Pulsos = NAN
     Else
       Flow_PStatus = 0
       Flow_PulsosTot = Flow_PulsosTot + Flow_Pulsos
-      If Flow_PulsosTot > 2000000000 Then
+      If Flow_PulsosTot > Flow_TotMax Then
         Flow_PulsosTot = 0
       EndIf
     EndIf

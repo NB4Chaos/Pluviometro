@@ -15,14 +15,25 @@ from datalogger import load_profile
 
 
 def _needed(profile):
-    """{tabela: [campos que o perfil le]}"""
+    """{tabela: [campos OBRIGATORIOS que o perfil le]}. Inclui o bloco "flow" (medidor de vazao): a grafia do campo precisa ser
+    exatamente a do programa (Flow_mode != Flow_Mode)."""
     need = {}
-    for key, fields in (("mass", ("value", "status")), ("temp", ("value",)), ("tips", ("count",)), ("cor", ("ma", "status"))):
+    for key, fields in (("mass", ("value", "status")), ("temp", ("value",)), ("tips", ("count",)), ("cor", ("ma", "status")),
+                        ("flow", ("ma", "status", "mode", "pulses", "pulses_total", "pulse_status"))):
         spec = profile.get(key)
         if spec:
+            opt = set(spec.get("optional", []))
             need.setdefault(spec["table"], [])
-            need[spec["table"]] += [spec[f] for f in fields if f in spec]
+            need[spec["table"]] += [spec[f] for f in fields if f in spec and f not in opt]
     return need
+
+
+def _optional(profile):
+    """{tabela: {campo: para que serve}} dos campos opcionais do medidor de vazao (canal de pulsos da v4)."""
+    spec = profile.get("flow") or {}
+    what = {"mode": "modo informado pelo programa (legado)", "pulses": "canal de pulsos (P2)", "pulses_total": "contador acumulado de pulsos",
+            "pulse_status": "estado do canal de pulsos"}
+    return {spec["table"]: {spec[k]: what.get(k, k) for k in spec.get("optional", []) if k in spec}} if spec else {}
 
 
 def run_probe(host, user="", password="", profile="programa_atual", https=False, timeout=5, ca=None, verify=True):
@@ -95,8 +106,13 @@ def run_probe(host, user="", password="", profile="programa_atual", https=False,
         names = [f["name"] for f in d["head"]["fields"]]
         missing = [f for f in fields if f not in names]
         if missing:
-            add("ERRO", f"Tabela '{table}': o campo '{', '.join(missing)}' nao existe. Campos disponiveis: {', '.join(names)}.")
+            near = [n for f in missing for n in names if n.lower() == f.lower()]
+            hint = f" Atencao: existe {', '.join(near)} com outra grafia (maiusculas/minusculas contam)." if near else ""
+            add("ERRO", f"Tabela '{table}': o campo '{', '.join(missing)}' nao existe. Campos disponiveis: {', '.join(names)}.{hint}")
             continue
+        for f, what in _optional(prof).get(table, {}).items():
+            if f not in names:
+                add("INFO", f"Tabela '{table}': sem o campo opcional '{f}' ({what}). Normal no programa v3; o canal de pulsos exige o programa v4.")
         if not d["data"]:
             add("AVISO", f"Tabela '{table}' existe, mas ainda nao tem registros.")
             continue

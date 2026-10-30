@@ -1,3 +1,5 @@
+> **Documento histórico (substituído em 28/10/2026).** Descreve `Pluviometria_Vazao.CR1X`, que nunca foi para o datalogger: modo trocado no próprio CR1000Xe, analógico em 2H/2L com shunt e campo `Flow_Mode`. O programa em uso é `Pluviometria_v3_com_vazao_4-20mA.CR1X` (4–20 mA em RG1) e o novo é `Pluviometria_v4_vazao_pulsos.CR1X`: veja `CRBASIC_V4_PULSOS.md`.
+
 # CRBasic: medidor de vazão em P2 (pulsos) ou 2H/2L (analógico)
 
 Arquivo novo: `crbasic/Pluviometria_Vazao.CR1X`. **O seu programa original não foi alterado** (`crbasic/Pluviometria.CR1X` continua sendo o de antes, só com a linha de

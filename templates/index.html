@@ -8,53 +8,77 @@
 <link rel="apple-touch-icon" href="/static/img/icone-192.png">
 <link rel="manifest" href="/static/manifest.webmanifest">
 <title>Elus · Monitor de calibração de pluviômetros</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Urbanist:wght@300;400;500;600&display=swap">
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/app.css?v=2026.10.28">
 </head>
-<body>
+<body data-method="grav">
+<a class="skip" href="#conteudo">Pular para o conteúdo</a>
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+</svg>
+
 <header class="topbar"><div class="top">
   <div class="brand"><img src="/static/img/logo-elus.jpeg" alt="Grupo Elus" width="283" height="101"></div>
   <nav class="nav" aria-label="Principal"><button data-v="dashboard">Dashboard</button><button data-v="graficos">Gráficos</button><button data-v="historico">Histórico</button><button data-v="config">Configurações</button></nav>
-  <span class="pill" id="conn"><i class="dot"></i><span>Conectando…</span></span>
+  <span class="pill" id="conn" role="status"><i class="dot"></i><span>Conectando…</span></span>
 </div></header>
 
-<div class="pg">
-<div class="hd"><h1 id="title">Dashboard</h1><div class="meta"><span class="pill">Atualizado em <b id="upd">—</b></span></div></div>
-<p class="note warnbox" id="skew" hidden></p>
+<main class="pg" id="conteudo" tabindex="-1">
+<div class="page-hd">
+  <div><h1 id="title">Dashboard</h1><p class="page-sub">Atualizado em <b id="upd">—</b></p></div>
+  <span class="pill" id="real"><i class="dot"></i><span>Aguardando conexão</span></span>
+</div>
+<p class="warnbox" id="skew" hidden></p>
 
 <div class="ctrl" id="ctrl">
   <div class="grp" id="period"><span class="lbl" title="O período define a precipitação acumulada, a intensidade média, a média do período e os gráficos.">Período</span>
-    <button class="chip" data-r="1m">1 min</button><button class="chip" data-r="15m">15 min</button><button class="chip" data-r="1h">1 h</button><button class="chip" data-r="6h">6 h</button><button class="chip" data-r="24h">24 h</button><button class="chip" data-r="custom">Personalizado</button>
+    <div class="chips"><button class="chip" data-r="1m">1 min</button><button class="chip" data-r="15m">15 min</button><button class="chip" data-r="1h">1 h</button><button class="chip" data-r="6h">6 h</button><button class="chip" data-r="24h">24 h</button><button class="chip" data-r="custom">Personalizado</button></div>
     <span class="grp" id="custom" hidden><label>Início<input type="datetime-local" id="c-from"></label><label>Fim<input type="datetime-local" id="c-to"></label><button class="btn y" id="c-apply">Aplicar</button></span></div>
+  <div class="grp" id="vm"><span class="lbl">Exibir</span>
+    <div class="seg sm" role="group" aria-label="Visualização dos resultados"><button data-x="precip">Precipitação</button><button data-x="flow">Vazão</button></div></div>
   <div class="grp" id="meth"><span class="lbl">Método</span>
-    <div class="seg sm" role="group" aria-label="Método de ensaio"><button data-m="grav">Gravimétrico</button><button data-m="comp">Comparativo</button></div></div>
+    <div class="seg sm" role="group" aria-label="Método de ensaio"><button data-m="grav">Gravimétrico</button><button data-m="comp">Comparativo</button></div>
+    <button class="btn ghost reveal" id="flow-params" aria-haspopup="dialog" aria-controls="fd"><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>Parâmetros do medidor</button></div>
 </div>
 
 <section id="v-dashboard" class="view">
- <!-- Card principal: a classe "hero", a posição e os controles do ensaio (#trial-ctl) são movidos pelo app.js conforme o método:
-      Gravimétrico → balança (hero) + pluviômetro · Comparativo → medidor de vazão (hero) + pluviômetro; a balança some. -->
- <div class="row" id="main-row">
-  <div class="card" id="c-mass"><div class="glow"></div>
-   <div class="hd"><span class="lbl">Balança de precisão</span><span class="meta"><span class="tag" id="bal-state" hidden></span><span class="pill" id="p-mass"><i class="dot"></i><span>Sem dados</span></span></span></div>
+ <div class="dash">
+  <article class="card hero" id="c-mass" aria-label="Balança de precisão MK30K1"><div class="glow" aria-hidden="true"></div>
+   <div class="card-hd"><div class="inst-id"><span class="eyebrow">Balança de precisão</span><span class="model">MK30K1 · referência gravimétrica</span></div><span class="meta"><span class="tag" id="bal-state">Sem ensaio</span><span class="pill" id="p-mass"><i class="dot"></i><span>Sem dados</span></span></span></div>
    <div><div class="big"><span id="bal-val">—</span><small id="bal-unit">g</small></div><p class="lbl" id="bal-name">Massa atual</p></div>
    <div class="bar" id="bal-bar" hidden><i></i></div>
    <div class="rg" id="bal-rows"></div>
    <div id="bal-notes"></div>
    <details class="more" id="bal-det" hidden><summary>Detalhes do ensaio</summary><div id="bal-det-body"></div></details>
-  </div>
+   <div class="grp go"><label class="inl" id="bal-dur-w">Duração<input type="number" id="bal-dur" min="10" max="21600" step="1" inputmode="numeric" aria-label="Duração do ensaio em segundos">s</label>
+    <button class="btn y" id="bal-go">Iniciar ensaio</button><span class="note" id="bal-msg" role="status"></span></div></article>
 
-  <div class="card" id="c-cor" hidden><div class="glow"></div>
-   <div class="hd"><span class="lbl">Medidor de vazão</span><span class="meta"><span class="tag" id="cor-state" hidden></span><span class="pill" id="p-cor"><i class="dot"></i><span>Sem dados</span></span></span></div>
-   <div class="grp"><div class="seg sm" id="cor-meth" role="group" aria-label="Método de aquisição do medidor"><button data-fm="analog">Analógico 4–20 mA</button><button data-fm="pulse">Pulsos</button></div><span class="note" id="cor-meth-note"></span></div>
-   <div><div class="big" id="cor-big"><span id="cor-val">—</span><small id="cor-unit">L/min</small></div><p class="lbl" id="cor-name">Vazão instantânea</p></div>
-   <div class="bar" id="cor-bar" hidden><i></i></div>
-   <div class="rg" id="cor-rows"></div>
-   <div id="cor-notes"></div>
-   <details class="more" id="cor-det" hidden><summary>Detalhes do ensaio</summary><div id="cor-det-body"></div></details>
-  </div>
+  <article class="card inst" id="c-cor" aria-labelledby="cor-title" hidden>
+   <div class="card-hd">
+    <div class="inst-id"><span class="eyebrow" id="cor-title">Medidor de vazão</span><span class="model">Siemens SITRANS FM MAG 5000</span></div>
+    <div class="inst-tools">
+     <div class="method" id="flow-method" role="group" aria-label="Método de aquisição da vazão" aria-describedby="flow-mstate">
+      <span class="thumb" aria-hidden="true"></span>
+      <button type="button" data-method="analog" aria-pressed="false">Analógico</button><button type="button" data-method="pulse" aria-pressed="false">Pulso</button>
+     </div>
+     <button type="button" class="icon-btn" id="flow-gear" aria-label="Parâmetros do medidor de vazão" aria-haspopup="dialog" aria-controls="fd"><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg></button>
+    </div>
+   </div>
+   <p class="mstate" id="flow-mstate" role="status" aria-live="polite"><i class="dot" aria-hidden="true"></i><span>Aguardando dados</span></p>
+   <div class="readout"><div class="big sm" id="cor-big"><span id="cor-val">—</span><small id="cor-unit">L/min</small></div><span class="pill" id="p-cor"><i class="dot"></i><span>Sem dados</span></span></div>
+   <p class="signal" id="cor-sig"></p>
+   <p class="note" id="cor-note"></p>
+   <div class="xcheck" id="cor-x" hidden></div>
+   <p class="lbl stat" id="cor-stats">Média do período —</p>
+  </article>
 
-  <div class="card" id="c-pluv">
-   <div class="hd"><span class="lbl">Pluviômetro de báscula</span><span class="meta"><span class="tag" id="pl-state" hidden></span><span class="pill" id="p-tips"><i class="dot"></i><span>Sem dados</span></span></span></div>
+  <article class="card" id="c-pluv" aria-label="Pluviômetro de báscula">
+   <div class="card-hd"><div class="inst-id"><span class="eyebrow">Pluviômetro de báscula</span><span class="model">contato seco em P1</span></div><span class="meta"><span class="tag" id="pl-state" hidden></span><span class="pill" id="p-tips"><i class="dot"></i><span>Sem dados</span></span></span></div>
    <div><div class="big"><span id="pl-val">—</span><small id="pl-unit">mm</small><span class="tag warn" id="pl-tag" title="O período não está inteiramente coberto por dados." hidden>parcial</span></div><p class="lbl" id="pl-name">Precipitação acumulada</p></div>
    <div class="rg" id="pl-rows"></div>
    <p class="note" id="pl-note" hidden></p>
@@ -62,45 +86,40 @@
    <details class="more"><summary>Basculadas registradas</summary>
     <div class="rg"><div class="rk"><span>Total desde "Zerar contagem"</span><b id="tips-total">—</b></div><div class="rk"><span>Última basculada</span><b id="last-tip">—</b></div></div>
     <ol class="evlist" id="ev-list"></ol>
-    <details class="more"><summary>Como ler esta lista</summary><p class="note">Massa ejetada = diferença da balança entre uma basculada e a anterior, lida 3 s depois da basculada (* = a seguinte veio antes). "—" quando a anterior tem mais de 10 min ou a massa diminuiu (tara). As barras alternam a cor porque as conchas se alternam; tons sistematicamente diferentes indicam um lado ejetando mais. Um pulso perdido inverte a alternância.</p></details>
-    <div class="grp"><button class="btn" id="reset">Zerar contagem</button></div></details></div>
- </div>
- <div class="row2">
-  <div class="card" id="c-temp"><div class="hd"><span class="lbl">Temperatura da água · termopar tipo T</span><span class="pill" id="p-temp"><i class="dot"></i><span>Sem dados</span></span></div>
-   <div class="big sm"><span id="temp-val">—</span><small id="temp-unit">°C</small></div>
-   <svg viewBox="0 0 300 60" width="100%" height="48" preserveAspectRatio="none" role="img" aria-label="Temperatura recente"><polyline id="spark" fill="none" stroke="#0B1F4B" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" points=""/></svg>
-   <p class="lbl" id="temp-stats">Média do período —</p></div>
- </div>
- <!-- Controles do ensaio: o app.js coloca este bloco dentro do card principal do método ativo -->
- <div class="grp go" id="trial-ctl">
-  <label class="inl" id="bal-dur-w">Duração<input type="number" id="bal-dur" min="1" step="any" inputmode="decimal" aria-label="Duração do ensaio"><select id="bal-dur-u" aria-label="Unidade da duração"><option value="ms">ms</option><option value="s">s</option><option value="min">min</option></select></label>
-  <button class="btn y" id="bal-go">Iniciar ensaio</button><span class="note" id="bal-msg" role="status"></span>
+    <p class="note">Massa ejetada = diferença da balança entre uma basculada e a anterior, lida 3 s depois de cada basculada para a água cair e a balança estabilizar (* = a basculada seguinte veio antes disso). Fica "—" quando a anterior tem mais de 10 min ou a massa diminuiu (tara). As barras alternam a cor porque as conchas se alternam; tons sistematicamente diferentes = um lado ejeta mais que o outro. Um pulso perdido inverte a alternância.</p>
+    <div class="grp"><button class="btn" id="reset">Zerar contagem</button></div></details></article>
+
+  <article class="card" id="c-temp" aria-label="Temperatura da água">
+   <div class="card-hd"><div class="inst-id"><span class="eyebrow">Temperatura da água</span><span class="model">termopar tipo T</span></div><span class="pill" id="p-temp"><i class="dot"></i><span>Sem dados</span></span></div>
+   <div class="temp-row"><div class="big sm"><span id="temp-val">—</span><small id="temp-unit">°C</small></div>
+    <svg class="spark" viewBox="0 0 300 60" preserveAspectRatio="none" role="img" aria-label="Temperatura recente"><polyline id="spark" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" points=""/></svg></div>
+   <p class="lbl" id="temp-stats">Média do período —</p></article>
  </div>
 </section>
 
 <section id="v-graficos" class="view">
- <div class="card" id="g-mass"><div class="hd"><h2>Balança</h2></div>
-  <div class="res"><b id="r-mass">—</b><span class="lbl" id="r-mass-n"></span><span class="sub" id="st-mass"></span></div><div class="chart main"><canvas id="ch-mass"></canvas></div></div>
- <div class="card" id="g-pluv"><div class="hd"><h2>Pluviômetro</h2></div>
-  <div class="res"><b id="r-pluv">—</b><span class="lbl" id="r-pluv-n"></span><span class="sub" id="st-pluv"></span></div><div class="chart"><canvas id="ch-pluv"></canvas></div></div>
- <div class="card" id="g-cor" hidden><div class="hd"><h2>Medidor de vazão</h2></div>
-  <div class="res"><b id="r-cor">—</b><span class="lbl" id="r-cor-n"></span><span class="sub" id="st-cor"></span></div><div class="chart"><canvas id="ch-cor"></canvas></div></div>
- <div class="card" id="g-temp"><div class="hd"><h2>Temperatura da água</h2></div>
-  <div class="res"><b id="r-temp">—</b><span class="lbl" id="r-temp-n"></span><span class="sub" id="st-temp"></span></div><div class="chart"><canvas id="ch-temp"></canvas></div></div>
+ <div class="card" id="g-mass"><div class="card-hd"><h2>Balança</h2><span class="live" aria-hidden="true">ao vivo</span></div>
+  <div class="res"><b id="r-mass">—</b><span class="lbl" id="r-mass-n"></span><span class="sub" id="st-mass"></span></div><div class="chart main"><canvas id="ch-mass" aria-label="Gráfico da massa no período"></canvas></div></div>
+ <div class="card" id="g-cor" hidden><div class="card-hd"><h2>Medidor de vazão</h2><span class="live" aria-hidden="true">ao vivo</span></div>
+  <div class="res"><b id="r-cor">—</b><span class="lbl" id="r-cor-n"></span><span class="sub" id="st-cor"></span></div><div class="chart"><canvas id="ch-cor" aria-label="Gráfico do medidor de vazão no período"></canvas></div></div>
+ <div class="card" id="g-pluv"><div class="card-hd"><h2>Pluviômetro</h2></div>
+  <div class="res"><b id="r-pluv">—</b><span class="lbl" id="r-pluv-n"></span><span class="sub" id="st-pluv"></span></div><div class="chart"><canvas id="ch-pluv" aria-label="Gráfico das basculadas no período"></canvas></div></div>
+ <div class="card" id="g-temp"><div class="card-hd"><h2>Temperatura da água</h2><span class="live" aria-hidden="true">ao vivo</span></div>
+  <div class="res"><b id="r-temp">—</b><span class="lbl" id="r-temp-n"></span><span class="sub" id="st-temp"></span></div><div class="chart"><canvas id="ch-temp" aria-label="Gráfico da temperatura no período"></canvas></div></div>
 </section>
 
 <section id="v-historico" class="view">
- <div class="card"><div class="grp" style="align-items:end">
-  <label>Sensor<select id="f-sensor"><option value="all">Todos</option><option value="mass">Balança</option><option value="temp">Termopar</option><option value="cor">Medidor de vazão</option><option value="tips">Pluviômetro</option></select></label>
-  <label>Estado<select id="f-state"><option value="all">Todos</option><option value="ok">Válida</option><option value="no_comm">Sem comunicação</option><option value="invalid">Leitura inválida</option><option value="out_of_range">Fora da faixa (medidor)</option><option value="fail">Falha do sinal (medidor)</option></select></label>
-  <span style="flex:1"></span><a class="btn y" id="x-csv" href="#">Exportar CSV</a><a class="btn" id="x-xlsx" href="#">Exportar Excel</a></div>
-  <p class="note">O período é o selecionado acima. A exportação usa os mesmos filtros e mantém os valores originais (massa em g, temperatura em °C, sinal em mA, pulsos brutos por Scan e acumulados; vazão em L/min pelo método configurado).</p></div>
- <div class="card"><div class="scroll"><table id="h-table" data-s="all"><thead><tr><th>Data e hora</th><th data-c="mass">Massa (<span id="h-unit">g</span>)</th><th data-c="temp">Temperatura (<span id="h-tunit">°C</span>)</th><th data-c="cor">Medidor (mA)</th><th data-c="cor">Pulsos (por Scan)</th><th data-c="cor">Vazão (<span id="h-funit">L/min</span>)</th><th data-c="tips">Basculadas (total desde zerar)</th><th data-c="tips">Precip. desde zerar (mm)</th><th>Estado</th></tr></thead><tbody id="h-body"></tbody><tfoot><tr id="h-foot"></tr></tfoot></table></div>
-  <div class="hd"><span class="note" id="h-count"></span><div class="meta"><button class="btn" id="h-prev">Anterior</button><button class="btn" id="h-next">Próxima</button></div></div></div>
- <div class="card"><div class="hd"><h2>Ensaios de calibração</h2><span class="note">Resultados congelados: não mudam com o tempo, com novas leituras nem com mudanças de configuração.</span></div>
-  <div class="scroll"><table style="min-width:760px"><thead><tr><th>Início (datalogger)</th><th>Tipo</th><th>Estado</th><th>Duração (efetiva / configurada)</th><th>Motivo / observação</th><th></th></tr></thead><tbody id="tr-hist"></tbody></table></div>
+ <div class="card"><div class="grp filters">
+  <label>Sensor<select id="f-sensor"><option value="all">Todos</option><option value="mass">Balança</option><option value="temp">Termopar</option><option value="cor">Medidor de Vazão</option><option value="tips">Pluviômetro</option></select></label>
+  <label>Estado<select id="f-state"><option value="all">Todos</option><option value="ok">Válida</option><option value="no_comm">Sem comunicação</option><option value="invalid">Leitura inválida</option><option value="out_of_range">Fora da faixa (Medidor de Vazão)</option></select></label>
+  <span class="spacer"></span><a class="btn y" id="x-csv" href="#">Exportar CSV</a><a class="btn" id="x-xlsx" href="#">Exportar Excel</a></div>
+  <p class="note">O período é o selecionado acima. A exportação usa os mesmos filtros e mantém os valores originais (massa em g, temperatura em °C, sinal em mA, pulsos brutos; vazão em L/min).</p></div>
+ <div class="card"><div class="scroll"><table id="h-table" data-s="all"><thead><tr><th>Data e hora</th><th data-c="mass">Massa (<span id="h-unit">g</span>)</th><th data-c="temp">Temperatura (<span id="h-tunit">°C</span>)</th><th data-c="cor">Medidor (mA)</th><th data-c="cor">Pulsos</th><th data-c="cor">Vazão (<span id="h-funit">L/min</span>)</th><th data-c="cor">Método</th><th data-c="tips">Basculadas (total desde zerar)</th><th data-c="tips">Precip. desde zerar (mm)</th><th>Estado</th></tr></thead><tbody id="h-body"></tbody><tfoot><tr id="h-foot"></tr></tfoot></table></div>
+  <div class="card-hd"><span class="note" id="h-count"></span><div class="meta"><button class="btn" id="h-prev">Anterior</button><button class="btn" id="h-next">Próxima</button></div></div></div>
+ <div class="card"><div class="card-hd"><h2>Ensaios de calibração</h2><span class="note">Resultados congelados: não mudam com o tempo, nem com novas leituras ou mudanças de configuração.</span></div>
+  <div class="scroll"><table style="min-width:760px"><thead><tr><th>Início (datalogger)</th><th>Tipo</th><th>Estado</th><th>Duração</th><th>Motivo / observação</th><th></th></tr></thead><tbody id="tr-hist"></tbody></table></div>
   <div id="tr-detail" hidden></div></div>
- <div class="card"><div class="hd"><h2>Eventos de basculamento</h2><div class="meta"><span class="note" id="ev-count"></span><a class="btn" id="x-ev" href="#">Exportar eventos</a></div></div>
+ <div class="card"><div class="card-hd"><h2>Eventos de basculamento</h2><div class="meta"><span class="note" id="ev-count"></span><a class="btn" id="x-ev" href="#">Exportar eventos</a></div></div>
   <div class="scroll"><table style="min-width:560px"><thead><tr><th>Data e hora</th><th>Intervalo desde a anterior</th><th>Massa 3 s após (<span class="h-mu">g</span>)</th><th>Massa ejetada desde a anterior (<span class="h-mu">g</span>)</th></tr></thead><tbody id="ev-body"></tbody></table></div></div>
 </section>
 
@@ -112,17 +131,9 @@
   <div class="card"><h2>Água</h2>
    <label>Densidade da água (g/cm³)<input type="text" inputmode="decimal" id="cf-dens"></label></div>
   <div class="card" id="cf-flow"><h2>Medidor de vazão</h2>
-   <p class="note">O método (analógico ou pulsos) é escolhido no card do medidor, no Método Comparativo. O datalogger mede os dois canais; aqui ficam os parâmetros de cada um.</p>
-   <p class="lbl sec">Pulsos · fator K</p>
-   <div class="cf-an"><label>Fator K<input type="text" inputmode="decimal" id="cf-k"></label><label>Unidade do fator K<select id="cf-ku"></select></label></div>
-   <p class="note" id="cf-k-note"></p>
-   <p class="lbl sec">Analógico 4–20 mA</p>
-   <div class="cf-an" id="cf-an-w">
-    <label>Vazão em 4 mA<input type="text" inputmode="decimal" id="cf-q4"></label>
-    <label>Vazão em 20 mA<input type="text" inputmode="decimal" id="cf-q20"></label>
-    <label>Unidade<select id="cf-cunit"><optgroup label="Volumétrica"><option>L/min</option><option>L/h</option><option>mL/min</option><option>mL/s</option><option>m³/h</option><option>m³/s</option><option>m³/min</option></optgroup><optgroup label="Mássica"><option>kg/h</option><option>kg/s</option></optgroup></select></label>
-    <label>Tolerância nos limites (mA)<input type="text" inputmode="decimal" id="cf-tol"></label></div>
-   <p class="note err" id="cf-cor-msg"></p></div>
+   <p class="note">Fator K, faixa 4–20 mA e tolerância ficam no painel do medidor, dentro do Método Comparativo.</p>
+   <div class="rg" id="cf-flow-sum"></div>
+   <div class="grp"><button type="button" class="btn" id="cf-flow-open" aria-haspopup="dialog" aria-controls="fd"><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>Abrir parâmetros do medidor</button></div></div>
  </div>
  <details class="card more-card"><summary>Exibição</summary>
   <div class="cfg">
@@ -132,18 +143,84 @@
    <label>Casas decimais da temperatura<input type="number" id="cf-td" min="0" max="6"></label>
    <label>Unidade de vazão<select id="cf-funit"><optgroup label="Volumétrica"><option>L/min</option><option>L/h</option><option>mL/min</option><option>mL/s</option><option>m³/h</option><option>m³/s</option><option>m³/min</option></optgroup><optgroup label="Mássica"><option>kg/h</option><option>kg/s</option></optgroup></select></label>
    <label>Casas decimais da vazão<input type="number" id="cf-fd" min="0" max="6"></label>
-   <label>Resultados do pluviômetro e da balança como<select id="cf-vmode"><option value="precip">Precipitação (mm, mm/h)</option><option value="flow">Vazão e volume</option></select></label>
    <label>Período inicial ao abrir o site<select id="cf-range"><option value="60">1 min</option><option value="900">15 min</option><option value="3600">1 h</option><option value="21600">6 h</option><option value="86400">24 h</option></select></label>
   </div></details>
  <div class="grp"><button class="btn y" id="cf-save">Salvar configurações</button><span class="note" id="cf-msg" role="status"></span></div>
 </section>
+</main>
+
+<div class="drawer-wrap" id="fd" hidden>
+ <div class="scrim" data-close></div>
+ <section class="drawer" role="dialog" aria-modal="true" aria-labelledby="fd-title" aria-describedby="fd-sub">
+  <div class="dr-hd">
+   <div><p class="eyebrow">Método comparativo</p><h2 id="fd-title">Medidor de vazão</h2>
+    <p class="dr-sub" id="fd-sub">O datalogger mede os dois canais o tempo todo. Aqui se define como cada um vira vazão; a escolha do canal fica no card de Vazão.</p></div>
+   <button type="button" class="icon-btn" data-close aria-label="Fechar o painel"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <p class="banner warn" id="fd-trial" hidden><svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg><span>Ensaio em andamento: o que for salvo agora vale para a leitura ao vivo. O ensaio usa os parâmetros congelados no início.</span></p>
+  <div class="tabs" role="tablist" aria-label="Parâmetros do medidor">
+   <button type="button" role="tab" id="tab-pulse" aria-controls="pan-pulse" aria-selected="true">Pulsos · fator K</button>
+   <button type="button" role="tab" id="tab-analog" aria-controls="pan-analog" aria-selected="false" tabindex="-1">Analógico 4–20 mA</button>
+   <button type="button" role="tab" id="tab-diag" aria-controls="pan-diag" aria-selected="false" tabindex="-1">Diagnóstico</button>
+   <span class="tab-ink" aria-hidden="true"></span>
+  </div>
+  <form id="fd-form" class="dr-body" novalidate>
+   <div class="panel" role="tabpanel" id="pan-pulse" aria-labelledby="tab-pulse" tabindex="0">
+    <div class="field">
+     <label for="fk-val">Fator K</label>
+     <div class="combo"><input type="text" id="fk-val" inputmode="decimal" autocomplete="off" aria-describedby="fk-help fk-err"><select id="fk-unit" aria-label="Unidade do fator K"><option>pulsos/L</option><option>pulsos/m³</option><option>L/pulso</option><option>mL/pulso</option></select></div>
+     <p class="help" id="fk-help">O valor configurado na saída de pulsos do MAG 5000: volume por pulso, ou f<sub>max</sub> ÷ Q<sub>max</sub> (em L/s) no modo frequência. Não existe K padrão; vazio = vazão por pulsos indisponível.</p>
+     <p class="err" id="fk-err" hidden></p>
+    </div>
+    <dl class="derived" id="fk-derived"></dl>
+   </div>
+   <div class="panel" role="tabpanel" id="pan-analog" aria-labelledby="tab-analog" tabindex="0" hidden>
+    <div class="row2f">
+     <div class="field"><label for="fa-q4">Vazão em 4 mA</label><input type="text" id="fa-q4" inputmode="decimal" autocomplete="off" aria-describedby="fa-err"></div>
+     <div class="field"><label for="fa-q20">Vazão em 20 mA</label><input type="text" id="fa-q20" inputmode="decimal" autocomplete="off" aria-describedby="fa-err"></div>
+    </div>
+    <div class="field"><label for="fa-unit">Unidade da faixa</label><select id="fa-unit"><optgroup label="Volumétrica"><option>L/min</option><option>L/h</option><option>mL/min</option><option>mL/s</option><option>m³/h</option><option>m³/s</option><option>m³/min</option></optgroup><optgroup label="Mássica"><option>kg/h</option><option>kg/s</option></optgroup></select>
+     <p class="help">A faixa deve ser a mesma do transmissor (Q<sub>max</sub> do MAG 5000 = vazão em 20 mA).</p></div>
+    <p class="err" id="fa-err" hidden></p>
+    <div class="field"><label for="fa-tol">Tolerância nos limites de 4 e 20 mA (mA)</label><input type="text" id="fa-tol" inputmode="decimal" autocomplete="off" aria-describedby="fa-tol-help fa-tol-err">
+     <p class="help" id="fa-tol-help">Dentro dela, a vazão fica presa ao limite (sem extrapolar) e a leitura é marcada “no limite”. Fora dela, nenhuma vazão é calculada. Abaixo de 3,6 mA é falha do sinal. De 0 a 0,2 mA.</p>
+     <p class="err" id="fa-tol-err" hidden></p></div>
+    <dl class="derived" id="fa-derived"></dl>
+   </div>
+   <div class="panel" role="tabpanel" id="pan-diag" aria-labelledby="tab-diag" tabindex="0" hidden>
+    <dl class="diag" id="fd-diag"></dl>
+    <div class="callout">
+     <p><b>Ligação dos pulsos: confirmar antes de ligar.</b> Nada aqui foi validado no equipamento.</p>
+     <ul>
+      <li>Saída digital do MAG 5000 no modo <b>passivo</b> (3–30 V, carga 200 Ω–10 kΩ). O modo ativo (24 V) passa dos ±20 V da entrada do CR1000Xe.</li>
+      <li>Pull-up externo dentro da faixa de carga (ex.: 1–4,7 kΩ para o 5 V do CR1000Xe) e comum da saída no G.</li>
+      <li>Terminais 56/57/58 segundo o manual: confirmar a função de cada um no diagrama da unidade.</li>
+      <li>O corte de vazão baixa do MAG zera as duas saídas abaixo de 0–9,9 % do Q<sub>max</sub>.</li>
+     </ul>
+    </div>
+   </div>
+   <fieldset class="disp" id="fd-disp"><legend>Exibição da vazão</legend>
+    <div class="row2f">
+     <div class="field"><label for="fd-funit">Unidade</label><select id="fd-funit"><optgroup label="Volumétrica"><option>L/min</option><option>L/h</option><option>mL/min</option><option>mL/s</option><option>m³/h</option><option>m³/s</option><option>m³/min</option></optgroup><optgroup label="Mássica"><option>kg/h</option><option>kg/s</option></optgroup></select></div>
+     <div class="field"><label for="fd-fdec">Casas decimais</label><input type="number" id="fd-fdec" min="0" max="6"></div>
+    </div>
+   </fieldset>
+   <div class="dr-ft">
+    <p class="note" id="fd-msg" role="status" aria-live="polite"></p>
+    <div class="discard" id="fd-discard" hidden><span>Descartar as alterações não salvas?</span><button type="button" class="btn sm" id="fd-discard-yes">Descartar</button><button type="button" class="btn sm ghost" id="fd-discard-no">Continuar editando</button></div>
+    <div class="dr-actions"><button type="button" class="btn" data-close>Cancelar</button><button type="submit" class="btn y" id="fd-save">Salvar parâmetros</button></div>
+   </div>
+  </form>
+ </section>
 </div>
+
 <script src="/static/vendor/chart.umd.js"></script>
 <script src="/static/vendor/socket.io.min.js"></script>
-<script src="/static/js/util.js"></script>
-<script src="/static/js/api.js"></script>
-<script src="/static/js/charts.js"></script>
-<script src="/static/js/trials.js"></script>
-<script src="/static/js/app.js"></script>
+<script src="/static/js/util.js?v=2026.10.28"></script>
+<script src="/static/js/api.js?v=2026.10.28"></script>
+<script src="/static/js/charts.js?v=2026.10.28"></script>
+<script src="/static/js/trials.js?v=2026.10.28"></script>
+<script src="/static/js/flow.js?v=2026.10.28"></script>
+<script src="/static/js/app.js?v=2026.10.28"></script>
 </body>
 </html>

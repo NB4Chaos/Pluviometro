@@ -67,10 +67,37 @@ const Charts = {
     sets.forEach((d, i) => ch.data.datasets[i].data = d);
     ch.update('none');
   },
+  flowKind: null,   // o que o gráfico do medidor mostra agora: 'flow' (L/min convertido) | 'hz' | 'ma'
   flow(pts, d, fs, base, cfg, cv) {
-    if (fs.flow) this.line('ch-cor', pts('flow', cv), { ...base, label: 'Vazão', avg: cv(fs.flow.avg), dec: cfg.flow_decimals, unit: cfg.flow_unit });   // K ou faixa 4–20 mA configurados
-    else if (d.flow_mode === 'pulse') this.line('ch-cor', pts('hz', v => v), { ...base, label: 'Frequência', avg: fs.pulses ? fs.pulses.avg_hz : null, dec: 1, unit: 'Hz' });   // sem K: frequência bruta, sem inventar vazão
-    else this.line('ch-cor', pts('cor_ma', v => v), { ...base, label: 'Sinal', avg: fs.ma.avg, dec: 3, unit: 'mA' });   // sem faixa: sinal bruto em mA
+    const m = d.flow_mode === 'pulse' ? 'pulsos' : 'analógico';
+    if (fs.flow) { this.flowKind = 'flow'; this.line('ch-cor', pts('flow', cv), { ...base, label: `Vazão (${m})`, avg: cv(fs.flow.avg), dec: cfg.flow_decimals, unit: cfg.flow_unit }); }   // K ou faixa 4–20 mA configurados
+    else if (d.flow_mode === 'pulse') { this.flowKind = 'hz'; this.line('ch-cor', pts('hz', v => v), { ...base, label: 'Frequência', avg: fs.pulses ? fs.pulses.avg_hz : null, dec: 1, unit: 'Hz' }); }   // sem K: frequência bruta, sem inventar vazão
+    else { this.flowKind = 'ma'; this.line('ch-cor', pts('cor_ma', v => v), { ...base, label: 'Sinal', avg: fs.ma.avg, dec: 3, unit: 'mA' }); }   // sem faixa: sinal bruto em mA
+  },
+  // Amostra nova pelo Socket.IO: entra no gráfico na hora e a janela desliza, sem consultar o banco nem refazer a série.
+  // Os valores são exatamente os recebidos (nenhuma suavização); a média do período só é recalculada na recarga periódica.
+  push(s, r, cfg, comp) {
+    if (!this.c['ch-mass'] || s.ts == null) return;
+    const mu = Units.mass[cfg.mass_unit] || Units.mass.g, tu = Units.temp[cfg.temp_unit] || Units.temp.C;
+    const f = s.flow || {}, cv = v => v == null ? null : Flow.convert(v, 'L/min', cfg.flow_unit, cfg.density_g_cm3);
+    const add = (id, y) => {
+      const ch = this.c[id];
+      if (!ch) return;
+      const [m, av] = ch.data.datasets, last = m.data[m.data.length - 1];
+      if (last && last.x >= s.ts) return;
+      m.data.push({ x: s.ts, y });
+      while (m.data.length && m.data[0].x < r.from) m.data.shift();
+      if (av && av.data.length === 2) { av.data[0].x = r.from; av.data[1].x = r.to; }
+      ch.options.scales.x.min = r.from; ch.options.scales.x.max = r.to;
+      ch.update('none');
+    };
+    add('ch-mass', s.mass_g == null ? null : mu.to(s.mass_g));
+    add('ch-temp', s.temp_c == null ? null : tu.to(s.temp_c));
+    if (comp && this.flowKind) {
+      const y = this.flowKind === 'flow' ? (f.state === 'ok' && f.method === s.flow_mode ? cv(f.lmin) : null)
+        : this.flowKind === 'hz' ? (s.cor_status === 'ok' ? s.flow_hz : null) : (s.cor_status === 'ok' ? s.cor_ma : null);
+      add('ch-cor', y);
+    }
   },
   render(d, r, cfg, comp) {
     const mu = Units.mass[cfg.mass_unit] || Units.mass.g, tu = Units.temp[cfg.temp_unit] || Units.temp.C;

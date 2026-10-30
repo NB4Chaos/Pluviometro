@@ -1,13 +1,13 @@
 """Emulador do CR1000X rodando os programas do usuário (tabelas Balanca1s, Termopar1s, Pluviometro1s, Resumo, Vazao1s).
 Imita a API web oficial (DataQuery, since-record / most-recent, Basic auth, valores "NAN" como texto).
-TODOS os dados são FICTÍCIOS; o texto da balança é INVENTADO só para o teste.
+TODOS os dados são FICTÍCIOS; o texto da balança é INVENTADO só para o teste (o formato real da MK30K1 não é conhecido).
 
-Esquemas da tabela Vazao1s (mesmos NOMES de campo dos programas CRBasic do projeto):
-  "v3": Pluviometria_v3_com_vazao_4-20mA.CR1X (programa em uso): Flow_mV, Flow_mA, Flow_Status, Flow_mode
-  "v4": Pluviometria_v4_vazao_pulsos.CR1X: v3 + Flow_Pulsos, Flow_PulsosTot, Flow_PStatus
+Esquemas da tabela Vazao1s (os mesmos nomes de campo dos programas CRBasic):
+  "v3": Pluviometria_v3_com_vazao_4-20mA.CR1X (em uso): Flow_mV, Flow_mA, Flow_Status, Flow_mode
+  "v4": Pluviometria_v4_vazao_pulsos.CR1X: os mesmos + Flow_Pulsos, Flow_PulsosTot, Flow_PStatus
 
-Comportamento da API reproduzido de propósito: `since-record` com p1 MAIOR que o último registro responde a partir do registro
-MAIS ANTIGO da tabela (foi isso que provocou a releitura do histórico em produção, ver docs/DIAGNOSTICO_2026-10-29.md)."""
+Comportamento real reproduzido: `since-record` com um número de registro AINDA NÃO GRAVADO responde a partir do registro
+mais antigo da tabela (era o que fazia o servidor confundir a resposta com "tabela reiniciada")."""
 import base64, json, math, threading, time, urllib.parse
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,30 +18,26 @@ BASE_FIELDS = {
     "Pluviometro1s": [("Pluvio_Basculadas_1s", "xsd:float"), ("Pluvio_Total", "xsd:float"), ("Pluvio_Chuva_mm", "xsd:float")],
     "Resumo": [("TotalOK", "xsd:long"), ("TotalFalha", "xsd:long"), ("FalhasSeguidas", "xsd:long")],
 }
-VAZAO_FIELDS = {
-    "v3": [("Flow_mV", "xsd:float"), ("Flow_mA", "xsd:float"), ("Flow_Status", "xsd:long"), ("Flow_mode", "xsd:long")],
-    "v4": [("Flow_mV", "xsd:float"), ("Flow_mA", "xsd:float"), ("Flow_Status", "xsd:long"), ("Flow_mode", "xsd:long"),
-           ("Flow_Pulsos", "xsd:float"), ("Flow_PulsosTot", "xsd:long"), ("Flow_PStatus", "xsd:long")],
-}
-FIELDS = dict(BASE_FIELDS, Vazao1s=VAZAO_FIELDS["v4"])   # compatibilidade com código que importa FIELDS
+VAZAO_V3 = [("Flow_mV", "xsd:float"), ("Flow_mA", "xsd:float"), ("Flow_Status", "xsd:long"), ("Flow_mode", "xsd:long")]
+VAZAO_V4 = VAZAO_V3 + [("Flow_Pulsos", "xsd:float"), ("Flow_PulsosTot", "xsd:long"), ("Flow_PStatus", "xsd:long")]
 
 
 class Fake:
     def __init__(self, prefill=120, lag=0.0, tip_every=20, ring=20000, schema="v4"):
         self.lag, self.tip_every, self.ring, self.schema = lag, tip_every, ring, schema
-        self.fields = dict(BASE_FIELDS, Vazao1s=VAZAO_FIELDS[schema])
+        self.fields = dict(BASE_FIELDS, Vazao1s=VAZAO_V4 if schema == "v4" else VAZAO_V3)
         self.tables = {n: [] for n in self.fields}
         self.next_no = {n: 0 for n in self.fields}
         self.lock = threading.Lock()
         self.outage, self.user, self.pw = False, "dash", "segredo"
         self.level, self.clock_offset = 3, 0.0   # 3 = somente leitura; deslocamento do relogio do datalogger (s)
         self.force = []          # um dict por tick: {"status": 3} ou {"temp": "NAN"}
-        # medidor de vazão: o datalogger mede os DOIS canais em todo Scan (v4); o servidor escolhe o método
-        self.flow_ma = 12.0          # corrente em RG1 (mA); "NAN" = sem leitura (Flow_Status 3)
-        self.flow_status = None      # None = calculado da corrente (0 ok / 1 abaixo / 2 acima / 3 NAN); número = forçado
-        self.pulses_per_s = 100      # pulsos contados em P2 por Scan (v4)
-        self.pulses_total = 0        # Flow_PulsosTot
-        self.pstatus = 0             # Flow_PStatus (0 válido, 1 primeiro Scan, 2 saturado, 3 > 12 kHz, 4 sem leitura)
+        self.future_from_oldest = True   # comportamento real do since-record com registro ainda nao gravado
+        # medidor de vazao (FICTICIO): corrente em mA (ou "NAN") e taxa de pulsos por segundo; codigos forcados quando nao None
+        self.flow_ma, self.flow_hz = 12.0, 100.0
+        self.flow_status = None          # forca Flow_Status (canal analogico)
+        self.flow_pstatus = None         # forca Flow_PStatus (canal de pulsos)
+        self.ptotal, self.first_flow = 0, True
         self.mass, self.i, self.tips, self.pluvio_total = 1000.0, 0, 0, 0.0
         self.t = datetime.now() - timedelta(seconds=prefill)
         self.running = False
@@ -59,23 +55,20 @@ class Fake:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     # ---- geração de dados (1 registro por segundo em cada tabela) ----
-    def _vazao_row(self):
+    def _vazao(self):
         ma = self.flow_ma
-        if ma == "NAN" or ma is None:
-            st, ma, mv = 3, "NAN", "NAN"
-        else:
-            st = 0 if 4.0 <= ma <= 20.0 else (1 if ma < 4.0 else 2)
-            mv = round(ma * 10, 4)
-        if self.flow_status is not None:
-            st = self.flow_status
-        row = [mv, ma, st, 2]
+        nan = ma == "NAN"
+        st = self.flow_status if self.flow_status is not None else (3 if nan else 1 if ma < 4 else 2 if ma > 20 else 0)
+        row = ["NAN" if nan else round(ma * 10, 4), ma, st, 2]
         if self.schema == "v4":
-            n = self.pulses_per_s
-            if self.pstatus == 0 and n is not None and n != "NAN":
-                self.pulses_total += int(n)
-                row += [n, self.pulses_total, 0]
+            if self.first_flow:            # 1a execucao do PulseCount: janela incompleta
+                cnt, pst, self.first_flow = 0, 1, False
             else:
-                row += ["NAN", self.pulses_total, self.pstatus or 4]
+                cnt = int(round(self.flow_hz))
+                pst = self.flow_pstatus if self.flow_pstatus is not None else 0
+            if pst == 0:
+                self.ptotal += cnt
+            row += [cnt, self.ptotal, pst]
         return row
 
     def tick(self, sleep=True):
@@ -85,7 +78,7 @@ class Fake:
         status = f.get("status", 0)
         self.mass += 0.1
         mass = "NAN" if status != 0 else round(self.mass, 1)
-        line = "" if status == 1 else "+ %8.1fg  \r\n" % self.mass
+        line = "" if status == 1 else "ST,GS,+%9.1f g\r\n" % self.mass
         temp = f.get("temp", round(21.8 + 0.05 * math.sin(self.i / 30), 2))
         tip = 1.0 if self.i % self.tip_every == 0 else 0.0
         self.tips += int(tip)
@@ -93,7 +86,7 @@ class Fake:
         rows = {"Balanca1s": [mass, status, status == 0, 9600, line],
                 "Termopar1s": [temp, 24.1],
                 "Pluviometro1s": [tip, self.pluvio_total, self.pluvio_total * 0.2],
-                "Vazao1s": self._vazao_row()}
+                "Vazao1s": self._vazao()}
         if self.i % 60 == 0:
             rows["Resumo"] = [self.i, 0, 0]
         stamp = self.t.strftime("%Y-%m-%dT%H:%M:%S") + ".00"
@@ -108,24 +101,15 @@ class Fake:
     def reset_total(self):          # o programa do datalogger reiniciou: Pluvio_Total volta a zero
         self.pluvio_total = 0.0
 
-    def reset_pulse_total(self):    # programa reiniciado: Flow_PulsosTot volta a zero
-        self.pulses_total = 0
-
     def restart_program(self):
-        """Programa reenviado ao datalogger: TODAS as tabelas são recriadas (numeração volta a 0, registros antigos somem)."""
+        """Programa reenviado: todas as tabelas recriadas (numeração volta a 0) e contadores do CRBasic zerados."""
         with self.lock:
-            for n in self.tables:
-                self.tables[n], self.next_no[n] = [], 0
-        self.pluvio_total, self.pulses_total = 0.0, 0
-
-    def drop_oldest(self, table, n):
-        """Anel circular sobrescreveu os n registros mais antigos (servidor ficou fora mais tempo que a tabela guarda)."""
-        with self.lock:
-            del self.tables[table][:n]
+            self.tables = {n: [] for n in self.fields}
+            self.next_no = {n: 0 for n in self.fields}
+        self.pluvio_total, self.ptotal, self.first_flow = 0.0, 0, True
 
     def run(self, period=1.0):
         self.running = True
-
         def loop():
             while self.running:
                 self.tick()
@@ -152,9 +136,11 @@ class Fake:
                 body = {"outcome": 1, "time": (datetime.now() + timedelta(seconds=self.clock_offset)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-4], "description": "The clock was checked"}
             else:
                 body = {"symbols": [{"name": n, "uri": "dl:" + n, "type": 6, "is_enabled": True, "is_read_only": False, "can_expand": True} for n in self.tables]}
-            return self._send(h, body)
+            b = json.dumps(body).encode()
+            h.send_response(200); h.send_header("Content-Type", "application/json; charset=UTF-8"); h.send_header("Content-Length", str(len(b))); h.end_headers()
+            return h.wfile.write(b)
         table = q.get("uri", "").replace("dl:", "")
-        if cmd != "DataQuery" or table not in self.tables:
+        if q.get("command") != "DataQuery" or table not in self.tables:
             return h.send_error(404)
         with self.lock:
             recs, mode = list(self.tables[table]), q.get("mode")
@@ -163,19 +149,16 @@ class Fake:
             sel = recs[-int(q.get("p1", 1)):]
         elif mode == "since-record":
             p1, p3 = int(q.get("p1", 0)), 500   # o servidor real decide o tamanho do bloco e avisa com "more"
-            sel = [r for r in recs if r[0] >= p1]
-            if not sel and recs and p1 > recs[-1][0]:   # pedido de um registro que AINDA NAO EXISTE: a API responde do mais antigo
-                sel = list(recs)
-            sel = sel[:p3 + 1]
+            if recs and p1 > recs[-1][0] and self.future_from_oldest:
+                sel = recs[:p3 + 1]             # registro ainda não gravado: responde a partir do mais antigo (real)
+            else:
+                sel = [r for r in recs if r[0] >= p1][:p3 + 1]   # mais antigo que o disponível: começa no mais antigo
             more, sel = len(sel) > p3, sel[:p3]
         else:
             return h.send_error(400)
         body = {"head": {"transaction": 0, "signature": 1, "environment": {"table_name": table, "model": "CR1000X"},
                          "fields": [{"name": n, "type": t, "process": "Smp"} for n, t in self.fields[table]]},
                 "data": [{"time": t, "no": no, "vals": v} for no, t, v in sel], "more": more}
-        self._send(h, body)
-
-    def _send(self, h, body):
         b = json.dumps(body).encode()
         h.send_response(200); h.send_header("Content-Type", "application/json; charset=UTF-8"); h.send_header("Content-Length", str(len(b))); h.end_headers()
         h.wfile.write(b)
