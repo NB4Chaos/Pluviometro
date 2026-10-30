@@ -122,7 +122,10 @@ const FlowUI = {
       if (xf.run) {
         if (mode === 'pulse') {
           val = r.pulses_total == null ? '—' : Fmt.int(r.pulses_total); unit = 'pulsos'; textual = false; name = 'Pulsos brutos acumulados no ensaio';
-          rows = Trials.timeRows(xf.t, xf.t.partial) + K('Pulsos no último Scan', fresh && f.pulses != null ? Fmt.int(f.pulses) : '—')
+          // Frequência = pulsos ÷ janela do último Scan (dado adquirido, não estimado); 0 Hz é válido; sem registro atual fica "—".
+          // A etiqueta traz a média do ensaio (N ÷ Δt efetivo) para não confundir instantânea com acumulada.
+          const fz = fresh && f.hz != null ? Fmt.num(f.hz, 1) : '—';
+          rows = Trials.timeRows(xf.t, xf.t.partial) + K(`Frequência (último Scan de ${fresh ? Fmt.num(f.window_s, 2) : '—'} s)`, fz, 'Hz', r.freq_mean_hz != null ? ['p', `média ${Fmt.num(r.freq_mean_hz, 1)} Hz`] : '')
             + K('Vazão média (N ÷ K ÷ Δt)', fnum(c(q && q.mean)), fu, PARC) + K('Volume (N ÷ K)', Fmt.num(r.volume_l, 3), 'L', PARC) + refRows;
         } else {
           name = 'Vazão instantânea · ensaio em andamento';
@@ -134,7 +137,11 @@ const FlowUI = {
         const T = xf.t.result && xf.t.result.timing;
         if (mode === 'pulse') {
           val = r.pulses_total == null ? '—' : Fmt.int(r.pulses_total); unit = 'pulsos'; textual = false; name = `Pulsos brutos no ensaio · Δt efetivo ${r.time_eff_ms == null ? '—' : Trials.dur(r.time_eff_ms)}`;
-          rows = K('Vazão média (N ÷ K ÷ Δt)', fnum(c(q && q.mean)), fu, CALC) + K('Volume (N ÷ K)', Fmt.num(r.volume_l, 3), 'L', CALC) + K('Fator K', r.k_pulses_per_l ? Fmt.sig(r.k_pulses_per_l, 6) : 'não configurado', r.k_pulses_per_l ? 'pulsos/L' : '', ['f', 'configurado']) + refRows;
+          const u = r.uncertainty, uq = u && u.flow_u_l_min != null ? c(u.flow_u_l_min) : null;
+          rows = K('Vazão média (N ÷ K ÷ Δt)', fnum(c(q && q.mean)), fu, CALC) + K('Volume (N ÷ K)', Fmt.num(r.volume_l, 3), 'L', CALC)
+            + K('Frequência média (N ÷ Δt)', Fmt.num(r.freq_mean_hz, 2), 'Hz', CALC)
+            + (uq != null ? K(`Incerteza-padrão da vazão (±1 pulso, relógio${u.k_included ? ', K' : '; K não informado'})`, `± ${Fmt.sig(uq, 2)}`, fu, CALC) : '')
+            + K('Fator K', r.k_pulses_per_l ? Fmt.sig(r.k_pulses_per_l, 6) : 'não configurado', r.k_pulses_per_l ? 'pulsos/L' : '', ['f', 'configurado']) + refRows;
         } else {
           val = fnum(c(q && q.mean)); textual = val === '—'; unit = textual ? '' : fu; name = `Vazão média do ensaio · ${T && T.eff_ms != null ? Trials.dur(T.eff_ms) : tSpan(xf)}`;
           rows = K('Corrente média', r.ma ? Fmt.num(r.ma.mean, 3) : '—', 'mA') + K('Volume (∫ vazão)', Fmt.num(r.volume_l, 3), 'L', CALC) + refRows;
@@ -225,18 +232,18 @@ const Drawer = {
   first() { const p = $(`#pan-${this.tab}`); return p && p.querySelector('input,select'); },
   fill() {
     const c = S.cfg;
-    $('#fk-val').value = fmtIn(c.flow_k_value); $('#fk-unit').value = c.flow_k_unit;
+    $('#fk-val').value = fmtIn(c.flow_k_value); $('#fk-unit').value = c.flow_k_unit; $('#fk-unc').value = fmtIn(c.flow_k_uncertainty_pct);
     $('#fa-q4').value = fmtIn(c.cor.q4); $('#fa-q20').value = fmtIn(c.cor.q20); $('#fa-unit').value = c.cor.unit; $('#fa-tol').value = fmtIn(c.flow_ma_tol);
     $('#fd-funit').value = c.flow_unit; $('#fd-fdec').value = c.flow_decimals;
-    ['#fk-val', '#fa-q4', '#fa-q20', '#fa-tol', '#fd-fdec'].forEach(s => $(s).removeAttribute('aria-invalid'));
-    ['#fk-err', '#fa-err', '#fa-tol-err'].forEach(s => { $(s).hidden = true; $(s).textContent = ''; });
+    ['#fk-val', '#fk-unc', '#fa-q4', '#fa-q20', '#fa-tol', '#fd-fdec'].forEach(s => $(s).removeAttribute('aria-invalid'));
+    ['#fk-err', '#fk-unc-err', '#fa-err', '#fa-tol-err'].forEach(s => { $(s).hidden = true; $(s).textContent = ''; });
     $('#fd-msg').textContent = ''; $('#fd-discard').hidden = true;
     $('#fd-trial').hidden = !(FlowUI.st && FlowUI.st.locked);
     this.snap = this.values();
     this.derive(); this.renderDiag();
   },
   values() {
-    return { k: $('#fk-val').value.trim(), ku: $('#fk-unit').value, q4: $('#fa-q4').value.trim(), q20: $('#fa-q20').value.trim(), cu: $('#fa-unit').value,
+    return { k: $('#fk-val').value.trim(), ku: $('#fk-unit').value, kunc: $('#fk-unc').value.trim(), q4: $('#fa-q4').value.trim(), q20: $('#fa-q20').value.trim(), cu: $('#fa-unit').value,
              tol: $('#fa-tol').value.trim(), fu: $('#fd-funit').value, fd: String($('#fd-fdec').value).trim() };
   },
   dirty() { return JSON.stringify(this.values()) !== JSON.stringify(this.snap); },
@@ -267,6 +274,8 @@ const Drawer = {
     if (which === 'all' || which === 'k') {
       const v = parseNum($('#fk-val').value);
       pick(this.err($('#fk-val'), '#fk-err', v === null ? '' : !isFinite(v) ? 'Use só números no fator K (ex.: 1000 ou 2,5).' : v <= 0 ? 'O fator K precisa ser maior que zero. Vazio = não configurado.' : ''));
+      const u = parseNum($('#fk-unc').value);
+      pick(this.err($('#fk-unc'), '#fk-unc-err', u === null ? '' : !isFinite(u) || u < 0 || u > 100 ? 'Incerteza do fator K: de 0 a 100 %, ou vazio.' : ''));
     }
     if (which === 'all' || which === 'range') {
       const a = parseNum($('#fa-q4').value), b = parseNum($('#fa-q20').value);
@@ -343,7 +352,7 @@ const Drawer = {
     const v = this.values(), btn = $('#fd-save');
     btn.disabled = true;
     try {
-      S.cfg = await Api.post('/api/config', { flow_k: { value: v.k, unit: v.ku }, cor: { q4: v.q4, q20: v.q20, unit: v.cu }, flow_ma_tol: v.tol,
+      S.cfg = await Api.post('/api/config', { flow_k: { value: v.k, unit: v.ku }, flow_k_uncertainty_pct: v.kunc, cor: { q4: v.q4, q20: v.q20, unit: v.cu }, flow_ma_tol: v.tol,
                                               flow_unit: v.fu, flow_decimals: v.fd });
       FlowUI.st = await Api.get('/api/flow').catch(() => FlowUI.st);
       this.fill();

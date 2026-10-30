@@ -110,7 +110,8 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
     """
     scan_ms = int(scan_ms or cfg.get("scan_ms") or 1000)
     ts = [r[0] for r in rows]
-    cov, gaps, complete = calc.window_coverage(ts, start, end)
+    # cobertura pela convenção do PulseCount: o registro em t cobre (t−Δ, t] (antes: [t, t+Δ), que deixava 1 Scan de fora)
+    cov, gaps, complete = calc.window_coverage(ts, start, end, nominal_ms=scan_ms, backward=True)
     q = {"window_s": (end - start) / 1000, "covered_s": cov / 1000, "gaps": gaps, "rows": len(rows),
          "coverage_complete": complete, "reasons": []}
     res = cfg.get("res_mm")
@@ -138,7 +139,7 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
         f = {"mode": mode, "method_cfg": cfg.get("flow_method"), "n_rows": len(rows), "n_valid": len(valid),
              "valid_fraction": len(valid) / len(rows) if rows else None, "flow_l_min": None, "volume_l": None,
              "pulses_total": None, "count_method": None, "pulses_sum": None, "resolution_pct": None, "freq_mean_hz": None, "time_eff_ms": None,
-             "ma": None, "n_clamped": None, "valid_s": None, "vs_reference": None, "other": None,
+             "uncertainty": None, "ma": None, "n_clamped": None, "valid_s": None, "vs_reference": None, "other": None,
              "k_pulses_per_l": k, "k_unit": cfg.get("k_unit"), "ma_tol": tol, "issues": []}
         # ---- contagem BRUTA de pulsos: calculada SEMPRE que há registros válidos do canal, com ou sem fator K (31/10)
         n = n_cum = None
@@ -159,6 +160,7 @@ def compute(rows, tips, cfg, start, end, kind, scan_ms=None):
                 pulse_span = sum(w[i] for i, ok in enumerate(pok) if ok) / 1000
             f["freq_mean_hz"] = n / pulse_span if pulse_span else None
             f["time_eff_ms"] = int(round(pulse_span * 1000)) if pulse_span else None
+            f["uncertainty"] = calc.pulse_uncertainty(n, k, pulse_span, cfg.get("k_unc_pct"))   # ±1 pulso, relógio e K (se informado)
             if n < MIN_PULSES:
                 f["issues"].append(f"só {n} pulsos no ensaio: 1 pulso = {100.0 / n if n else 100:.2g} % do volume (resolução da contagem)")
         if valid:
@@ -343,7 +345,7 @@ class Trials:
                 "k_pulses_per_l": cfg["flow_k_pulses_per_l"], "q4": cfg["cor"]["q4"], "q20": cfg["cor"]["q20"],
                 "range_unit": cfg["cor"]["unit"], "duration_s": dur, "duration_ms": dur_ms, "scan_ms": self.scan_ms,
                 "flow_method": cfg.get("flow_method", "analog"), "k_unit": cfg.get("flow_k_unit", "pulsos/L"),
-                "ma_tol": cfg.get("flow_ma_tol", calc.MA_TOL)}
+                "ma_tol": cfg.get("flow_ma_tol", calc.MA_TOL), "k_unc_pct": cfg.get("flow_k_uncertainty_pct")}
         tid = f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
         start = lt + 1     # primeira amostra do ensaio = a PRÓXIMA; a leitura que já estava na tela não entra
         try:

@@ -175,6 +175,12 @@
      <p class="help" id="fk-help">O valor configurado na saída de pulsos do medidor: volume por pulso, ou f<sub>max</sub> ÷ Q<sub>max</sub> (em L/s) no modo frequência. Não existe K padrão; vazio = vazão por pulsos indisponível. A contagem bruta é mostrada mesmo sem K.</p>
      <p class="err" id="fk-err" hidden></p>
     </div>
+    <div class="field">
+     <label for="fk-unc">Incerteza do fator K (%) <span class="help" style="display:inline">opcional</span></label>
+     <input type="text" id="fk-unc" inputmode="decimal" autocomplete="off" aria-describedby="fk-unc-help fk-unc-err">
+     <p class="help" id="fk-unc-help">Incerteza relativa do K segundo o certificado do medidor. Vazio = não informada: a incerteza da vazão mostra só a contagem (±1 pulso) e o relógio do datalogger, e diz que K não entrou.</p>
+     <p class="err" id="fk-unc-err" hidden></p>
+    </div>
     <dl class="derived" id="fk-derived"></dl>
    </div>
    <div class="panel" role="tabpanel" id="pan-analog" aria-labelledby="tab-analog" tabindex="0" hidden>

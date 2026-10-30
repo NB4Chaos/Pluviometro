@@ -14,7 +14,8 @@ Documentação: `docs/DIAGNOSTICO.md` (problemas, alterações, desempenho), `do
 `docs/CRBASIC_VAZAO.md` (programa novo, ligações), `docs/DEBUG.md` (onde mexer), `docs/TESTES.md` (o que foi e o que não foi testado),
 `docs/MAPA_VARIAVEIS.md`, `docs/CHECKLIST.md` (validação no equipamento), `docs/PESQUISA.md` (arquitetura e fontes),
 `docs/DESEMPENHO_BACKEND.md` (otimização do backend: antes × depois), `docs/DIAGNOSTICO_2026-10-31.md` e `docs/ENTREGA_2026-10-31.md`
-(refinamento sobre o pacote do TI: tipografia original, pulsos brutos como valor principal, card principal dinâmico, duração em ms, temporização).
+(refinamento sobre o pacote do TI: tipografia original, pulsos brutos como valor principal, card principal dinâmico, duração em ms, temporização),
+`docs/CADEIA_VAZAO_2026-10-31.md` (cadeia pulsos → N → volume → tempo efetivo → vazão → frequência → incerteza: investigação, correções e testes).
 
 ## Instalação e execução (Windows)
 

@@ -36,11 +36,11 @@ const Trials = {
   // temporização do ensaio: carimbos do datalogger, configurado × efetivo, resolução (= Scan)
   timingHtml(res) {
     const t = res && res.timing; if (!t) return '';
-    const K = this.kv.bind(this), d = this.dur.bind(this);
-    const h = K('Início (datalogger)', Fmt.dtms(t.start_ts)) + K('Fim previsto', Fmt.dtms(t.end_ts)) + K('Duração configurada', d(t.cfg_ms))
+    const K = this.kv.bind(this), d = this.dur.bind(this), stamp = t.resolution_ms < 1000 ? Fmt.dtms : Fmt.dt;   // ms só quando o Scan resolve ms
+    const h = K('Início (datalogger)', stamp(t.start_ts)) + K('Fim previsto', stamp(t.end_ts)) + K('Duração configurada', d(t.cfg_ms))
       + K('Tempo efetivo (1º → último registro + Scan)', t.eff_ms == null ? '—' : d(t.eff_ms)) + K('Diferença efetivo − configurado', t.diff_ms == null ? '—' : `${t.diff_ms > 0 ? '+' : ''}${t.diff_ms} ms`, '', t.diff_ms ? ['p', 'lacuna'] : '')
       + K('Resolução (Scan do datalogger)', `${t.resolution_ms} ms`) + K('Registros no ensaio', t.samples)
-      + K('Primeiro registro', Fmt.dtms(t.first_sample_ts)) + K('Último registro', Fmt.dtms(t.last_sample_ts)) + (t.wall_ms != null ? K('Tempo de parede (servidor)', d(t.wall_ms)) : '');
+      + K('Primeiro registro', stamp(t.first_sample_ts)) + K('Último registro', stamp(t.last_sample_ts)) + (t.wall_ms != null ? K('Tempo de parede (servidor, informativo)', d(t.wall_ms)) : '');
     return `<p class="lbl sec">Temporização</p><div class="rg">${h}</div>`;
   },
   cfgText(c) {
@@ -51,7 +51,7 @@ const Trials = {
     if (c.area_cm2 != null) p.push(`A = ${Fmt.num(c.area_cm2, 1)} cm²`);
     if (c.res_mm != null) p.push(`resolução = ${Fmt.any(c.res_mm)} mm/basculada`);
     if (c.flow_method) p.push(`método = ${c.flow_method === 'pulse' ? 'pulsos' : 'analógico'}`);
-    if ('k_pulses_per_l' in c) p.push(`K = ${this.kText(c)}`);
+    if ('k_pulses_per_l' in c) p.push(`K = ${this.kText(c)}${c.k_unc_pct != null ? ` (u = ${Fmt.any(c.k_unc_pct)} %)` : ''}`);
     if (c.q4 != null && c.q20 != null) p.push(`4–20 mA = ${Fmt.sig(c.q4)}–${Fmt.sig(c.q20)} ${c.range_unit || ''}`);
     if (c.ma_tol != null) p.push(`tolerância = ${Fmt.num(c.ma_tol, 3)} mA`);
     return p.length ? p.join(' · ') : JSON.stringify(c);
@@ -72,6 +72,13 @@ const Trials = {
     }
     h += K('Vazão média' + (f.mode === 'pulse' ? ' (N ÷ K ÷ Δt)' : ''), n(c(q && q.mean), dm), fu, p || C) + K('Vazão máxima', n(c(q && q.max), dm), fu, p || C) + K('Vazão mínima', n(c(q && q.min), dm), fu, p || C)
       + K('Volume no ensaio' + (f.mode === 'pulse' ? ' (N ÷ K)' : ''), n(f.volume_l, 3), 'L', p || C);
+    const u = f.uncertainty;   // só componentes demonstráveis (±1 pulso, relógio do datalogger, K se informado), combinadas em quadratura
+    if (u) {
+      h += K('Incerteza da contagem (±1 pulso, retangular)', Fmt.sig(u.pulses_rel_pct, 2), '%') + K('Incerteza do relógio do datalogger (±3 min/ano)', Fmt.sig(u.clock_rel_pct, 2), '%')
+        + K('Incerteza do fator K', u.k_included ? Fmt.sig(u.k_rel_pct, 2) : 'não informada (não entrou)', u.k_included ? '%' : '')
+        + K('Incerteza-padrão combinada da vazão', Fmt.sig(u.flow_rel_pct, 2), '%', C);
+      if (u.flow_u_l_min != null) h += K('Vazão média ± u', `${n(c(q && q.mean), dm)} ± ${Fmt.sig(c(u.flow_u_l_min), 2)}`, fu, C) + K('Volume ± u', `${n(f.volume_l, 3)} ± ${Fmt.sig(u.volume_u_l, 2)}`, 'L', C);
+    }
     if (f.ma) h += K('Corrente média', n(f.ma.mean, 3), 'mA', p);
     if (f.n_clamped) h += K('Leituras no limite (4 ou 20 mA)', f.n_clamped);
     h += K('Leituras válidas', f.n_rows ? `${f.n_valid}/${f.n_rows} (${n(100 * f.valid_fraction, 0)} %)` : '—');

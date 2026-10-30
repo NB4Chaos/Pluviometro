@@ -32,6 +32,7 @@ DEFAULTS = {"mass_unit": "g", "temp_unit": "C", "flow_unit": "L/min", "mass_deci
             "catch_area_cm2": None,        # área da ABERTURA do coletor (cm²). Não é a da báscula.
             "flow_k_pulses_per_l": None,   # fator K do medidor por pulsos, sempre em pulsos/L (fonte única). Nunca presumido.
             "flow_k_unit": "pulsos/L",     # só a unidade em que o operador digita e vê o K (calc.K_UNITS)
+            "flow_k_uncertainty_pct": None,   # incerteza relativa do K (certificado do medidor), opcional; None = não informada
             "flow_method": "analog",       # método do cálculo da vazão: analog | pulse (o datalogger mede os dois canais)
             "flow_ma_tol": calc.MA_TOL,    # mA: tolerância nos limites 4 e 20 mA (dentro dela a escala fica presa no limite)
             "trial_duration_ms": 60000,    # duração dos ensaios; fixada no início de cada ensaio; mínimo = Scan do datalogger
@@ -107,6 +108,9 @@ def _read_cfg():
     if k is not None and (isinstance(k, bool) or not isinstance(k, (int, float)) or not math.isfinite(k) or k <= 0):
         log.warning("Fator K inválido no config.json (%r): ignorado; a vazão por pulsos fica 'não configurada'", k)
         cfg["flow_k_pulses_per_l"] = None
+    ku = cfg.get("flow_k_uncertainty_pct")   # incerteza relativa do K (certificado do medidor), opcional: None = não entra na combinação
+    if ku is not None and (isinstance(ku, bool) or not isinstance(ku, (int, float)) or not math.isfinite(ku) or not 0 <= ku <= 100):
+        cfg["flow_k_uncertainty_pct"] = None
     return cfg, user.get("comm", {})
 
 
@@ -262,7 +266,8 @@ def flow_stats(where, a, cfg):
     clamp = "MIN(MAX(cor_ma,4.0),20.0)"
     an = q(f"SELECT AVG(cor_ma),MIN(cor_ma),MAX(cor_ma),COUNT(cor_ma),AVG({clamp}),MIN({clamp}),MAX({clamp}) {base} "
            f"AND COALESCE(flow_mode,'analog')='analog'", a)[0]
-    f = lambda v: None if v is None else round(v, 3)
+    f = lambda v: None if v is None else round(v, 3)       # mA e Hz: 3 casas (resolução do sinal)
+    fq = lambda v: None if v is None else round(v, 9)      # vazão em L/min: sem arredondar antes da conversão de unidade na tela
     ma = {"avg": f(an[0]), "min": f(an[1]), "max": f(an[2]), "n": an[3], "n_out": n_out}
     out = {"ma": ma, "flow": None, "pulses": None, "mode": "pulse" if pu[3] > an[3] else "analog" if an[3] else None,
            "mixed": bool(pu[3] and an[3])}
@@ -271,12 +276,12 @@ def flow_stats(where, a, cfg):
     use_pulse = out["mode"] == "pulse"
     k, cor = cfg["flow_k_pulses_per_l"], cfg["cor"]
     if use_pulse and k:
-        out["flow"] = {"avg": f(pu[0] / k * 60), "min": f(pu[1] / k * 60), "max": f(pu[2] / k * 60), "unit": "L/min"}
+        out["flow"] = {"avg": fq(pu[0] / k * 60), "min": fq(pu[1] / k * 60), "max": fq(pu[2] / k * 60), "unit": "L/min"}
     elif not use_pulse and an[3] and cor["q4"] is not None and cor["q20"] is not None:
         vals = [calc.analog_flow_l_min(m, cor["q4"], cor["q20"], cor["unit"], cfg["density_g_cm3"]) for m in (an[4], an[5], an[6])]
         if None not in vals:
             lo, hi = sorted([vals[1], vals[2]])
-            out["flow"] = {"avg": f(vals[0]), "min": f(lo), "max": f(hi), "unit": "L/min"}
+            out["flow"] = {"avg": fq(vals[0]), "min": fq(lo), "max": fq(hi), "unit": "L/min"}
     return out
 
 
@@ -669,7 +674,7 @@ def series():
         out["t"].append(ts[j - 1])
         for k, v in cols.items():
             vals = [y for y in v[i:j] if y is not None]
-            out[k].append(round(sum(vals) / len(vals), 3) if vals else None)
+            out[k].append(round(sum(vals) / len(vals), 9 if k == "flow" else 3) if vals else None)   # vazão em L/min sem arredondamento prematuro
     out["flow_mode"] = next((r[5] for r in reversed(rows) if r[5]), None)
     out["stats"] = stats("ts>=? AND ts<?", [fr, to])
     out["tips"] = [r[0] for r in q("SELECT ts FROM tips WHERE ts>=? AND ts<? ORDER BY ts", (fr, to))]
@@ -981,6 +986,12 @@ def set_config():
             if d["flow_k_unit"] not in calc.K_UNITS:
                 raise ValueError("Unidade do fator K inválida.")
             cfg["flow_k_unit"] = d["flow_k_unit"]
+        if "flow_k_uncertainty_pct" in d:   # opcional; vazio = não informada (a combinação de incertezas diz que K não entrou)
+            v = d["flow_k_uncertainty_pct"]
+            v = None if v in (None, "") else num(v, "Incerteza do fator K")
+            if v is not None and not 0 <= v <= 100:
+                raise ValueError("Incerteza do fator K: use de 0 a 100 %.")
+            cfg["flow_k_uncertainty_pct"] = v
         if "flow_ma_tol" in d:
             tol = num(d["flow_ma_tol"], "Tolerância nos limites de 4 e 20 mA")
             if not 0 <= tol <= 0.2:

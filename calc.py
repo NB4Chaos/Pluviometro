@@ -37,11 +37,14 @@ def count_in(ts_list, start, end):
     return bisect_left(ts_list, end) - bisect_left(ts_list, start)
 
 
-def covered_intervals(sample_ts, start, end, max_gap_ms=MAX_GAP_MS, nominal_ms=NOMINAL_MS):
+def covered_intervals(sample_ts, start, end, max_gap_ms=MAX_GAP_MS, nominal_ms=NOMINAL_MS, backward=False):
     """Trechos de [start, end) realmente cobertos por amostras.
 
-    Cada amostra cobre [ts, próxima amostra) se a distância até a próxima for ≤ max_gap_ms; se for maior (lacuna),
-    cobre só o próprio período nominal. A última amostra cobre um período nominal. Resultado: lista de (a, b) fundidos.
+    backward=False (períodos da tela): cada amostra cobre [ts, próxima amostra) se a distância até a próxima for ≤ max_gap_ms;
+    se for maior (lacuna), cobre só o próprio período nominal; a última cobre um período nominal.
+    backward=True (ensaios): o registro em t traz o que o datalogger CONTOU em (t−Δ, t], Δ = intervalo até o registro anterior
+    (≤ max_gap_ms) ou o Scan nominal; logo cobre [t−Δ, t), recortado à janela. É a convenção física do `PulseCount`.
+    Resultado: lista de (a, b) fundidos.
     """
     ts = [t for t in sample_ts if start <= t < end]
     out = []
@@ -51,27 +54,59 @@ def covered_intervals(sample_ts, start, end, max_gap_ms=MAX_GAP_MS, nominal_ms=N
     last = len(ts) - 1
     for i, t in enumerate(ts):
         w = nominal_ms
-        if i < last:
-            d = ts[i + 1] - t
-            if d <= max_gap_ms:
-                w = d
-        e = t + w
-        if e > end:
-            e = end
-        if a is not None and t <= b:
+        if backward:
+            if i > 0 and t - ts[i - 1] <= max_gap_ms:
+                w = t - ts[i - 1]
+            s0, e = max(start, t - w), t
+            if e <= s0:
+                continue
+        else:
+            if i < last:
+                d = ts[i + 1] - t
+                if d <= max_gap_ms:
+                    w = d
+            s0, e = t, min(end, t + w)
+        if a is not None and s0 <= b:
             if e > b:
                 b = e
         else:
             if a is not None:
                 out.append((a, b))
-            a, b = t, e
-    out.append((a, b))
+            a, b = s0, e
+    if a is not None:
+        out.append((a, b))
     return out
 
 
 def window_coverage(sample_ts, start, end, **kw):
     """(ms cobertos, nº de lacunas, completo?). Completo = descoberto ≤ max(3 períodos nominais (inclui a latência de ~1–2 s do dado mais recente), 2 % da janela)."""
     return _coverage(covered_intervals(sample_ts, start, end, **kw), start, end)
+
+
+# ---------------------------------------------------------------- incerteza da vazão por pulsos (só o que é demonstrável)
+CLOCK_REL = 3.0 / (365.25 * 24 * 60)   # exatidão do relógio do CR1000X: ±3 min/ano (0–40 °C) [especificação Campbell] ≈ 5,7 ppm
+
+
+def pulse_uncertainty(n, k_pulses_per_l, span_s, k_rel_pct=None):
+    """Incerteza-padrão relativa (%) de V = N/K e Q = N/(K·t) por pulsos, com as componentes que o sistema CONHECE:
+      pulsos : a contagem é exata dentro da janela, mas a fase dos pulsos nas bordas vale ±1 pulso (distribuição retangular → 1/√3)
+      relógio: deriva do relógio do datalogger (especificação), que afeta só o tempo t
+      K      : incerteza do fator K informada pelo operador/certificado (%); None = NÃO incluída (nunca presumida)
+    Combinação em quadratura. Devolve None quando N é 0 (sem pulsos não há vazão a qualificar)."""
+    if not n or n <= 0 or span_s is None or span_s <= 0:
+        return None
+    u_n = 100.0 / (n * math.sqrt(3.0))
+    u_c = 100.0 * CLOCK_REL
+    u_k = float(k_rel_pct) if k_rel_pct is not None and k_rel_pct >= 0 else None
+    comb_v = math.sqrt(u_n ** 2 + (u_k or 0.0) ** 2)
+    comb_q = math.sqrt(u_n ** 2 + u_c ** 2 + (u_k or 0.0) ** 2)
+    out = {"pulses_rel_pct": u_n, "clock_rel_pct": u_c, "k_rel_pct": u_k, "k_included": u_k is not None,
+           "volume_rel_pct": comb_v, "flow_rel_pct": comb_q, "volume_u_l": None, "flow_u_l_min": None}
+    if k_pulses_per_l and k_pulses_per_l > 0:
+        v = n / k_pulses_per_l
+        out["volume_u_l"] = v * comb_v / 100.0
+        out["flow_u_l_min"] = (v / span_s * 60.0) * comb_q / 100.0
+    return out
 
 
 def _coverage(iv, start, end):
